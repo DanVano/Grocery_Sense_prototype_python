@@ -1,40 +1,29 @@
-"""
-Grocery_Sense.config.config_store
-
-Centralized configuration & user profile management for Grocery Sense.
-
-Responsibilities:
-- Persist user config to a JSON file (local, no cloud for now)
-- Provide helpers for:
-    - postal_code / city / country
-    - store priority / favorites (by store name or ID)
-    - user_profile (diet, allergies, preferences)
-
-This module is the *single source of truth* for profile & config
-that both Grocery Sense and (later) AI Chef can share.
-"""
-
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 # ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
 
-# Project root: .../Grocery-Sense-Prototype-Python/src
+# Expected location:
+#   .../src/Grocery_Sense/config_store.py
+# parents[1] => .../src
 _BASE_DIR = Path(__file__).resolve().parents[1]
 
-# Config directory: src/config/
 _CONFIG_DIR = _BASE_DIR / "config"
 _CONFIG_FILE = _CONFIG_DIR / "user_config.json"
-
-# Make sure the config directory exists when we first write
 _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+PROFILE_VERSION = 3  # bumped because we're formalizing household baseline + reset semantics
+
+ROLE_MASTER = "master"
+ROLE_SECONDARY = "secondary"
+VALID_ROLES = {ROLE_MASTER, ROLE_SECONDARY}
 
 _VALID_DIETS = {
     "vegan",
@@ -45,38 +34,300 @@ _VALID_DIETS = {
     "omnivore",
 }
 
+# These are used by preferences_service + UI.
+DEFAULT_PROTEINS: List[str] = [
+    "chicken",
+    "beef",
+    "pork",
+    "lamb",
+    "turkey",
+    "fish",
+    "shellfish",
+    "plant proteins",
+]
+
+DEFAULT_OILS: List[str] = [
+    "olive oil",
+    "avocado oil",
+    "butter/ghee",
+    "coconut oil",
+    "vegetable oil",
+    "canola oil",
+    "soybean oil",
+    "sunflower oil",
+    "corn oil",
+    "grapeseed oil",
+    "sesame oil",
+    "peanut oil",
+]
+
+DEFAULT_CUISINES: List[str] = [
+    "european",
+    "east asian",
+    "southeast asian",
+    "south asian",
+    "mexican",
+    "jamaican",
+    "middle eastern",
+    "mediterranean",
+    "indian",
+    "korean",
+    "japanese",
+    "chinese",
+    "thai",
+    "vietnamese",
+]
+
 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
 
+@dataclass
+class HouseholdMember:
+    id: int
+    name: str
+    role: str = ROLE_SECONDARY
+    profile: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Household:
+    primary_member_id: int = 1
+    active_member_id: int = 1
+    members: List[HouseholdMember] = field(default_factory=list)
+
 
 @dataclass
 class UserConfig:
     """
-    Top-level config structure.
-
-    Stored as JSON at: src/config/user_config.json
+    Top-level config structure stored as JSON at: src/config/user_config.json
     """
+
+    profile_version: int = PROFILE_VERSION
+
     postal_code: str = ""
     city: str = ""
     country: str = "CA"
 
-    # Optional: store-level preferences (by name or ID)
-    # Example: {"Costco": 10, "Save-On-Foods": 8}
     store_priority: Dict[str, int] = field(default_factory=dict)
-
-    # Optional list of store IDs you consider "favorite"
     favorite_store_ids: List[int] = field(default_factory=list)
 
-    # Arbitrary profile dict (see default_profile() below)
-    profile: Dict[str, Any] = field(default_factory=dict)
+    household: Household = field(default_factory=Household)
+
+
+# ---------------------------------------------------------------------------
+# Defaults / validation
+# ---------------------------------------------------------------------------
+
+def default_member_profile() -> Dict[str, Any]:
+    """
+    Canonical profile shape for a household member.
+
+    IMPORTANT: Household baseline == MASTER profile.
+    Secondary member profiles store ONLY their overrides + allergies/soft dislikes.
+    """
+    return {
+        # Baseline dietary toggles
+        "eats_meat": True,
+        "eats_fish": True,   # fish/seafood umbrella
+        "eats_dairy": True,
+        "eats_eggs": True,
+
+        # Proteins (use excludes + weights)
+        "excluded_proteins": [],                 # list[str]
+        "preferred_protein_weights": {},         # dict[str,float], default=1.0 if missing
+
+        # Safety
+        "allergies": [],                         # ALWAYS hard exclude household-wide when merging
+
+        # Preference filtering
+        "hard_excludes": [],                     # master only; secondaries are converted to soft
+        "soft_excludes": [],
+
+        # Taste / discovery
+        "favorite_cuisines": [],
+        "spice_level": "medium",                 # low|medium|high
+        "meal_styles": [],                       # e.g. ["soups_stews", "saucy"]
+
+        # Oils used (empty => no restriction)
+        "oils_allowed": [],                      # list[str]
+
+        # Legacy compatibility fields
+        "diet": "meat eater",
+        "favorite_tags": [],
+        "price_sensitivity": "medium",           # low|medium|high
+    }
+
+
+def _sanitize_list(values: Any) -> List[str]:
+    if isinstance(values, str):
+        return [v.strip().lower() for v in values.split(",") if v.strip()]
+    if isinstance(values, list):
+        out: List[str] = []
+        for v in values:
+            s = str(v).strip().lower()
+            if s:
+                out.append(s)
+        return out
+    return []
+
+
+def _sanitize_bool(v: Any, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(int(v))
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in {"1", "true", "yes", "y", "on"}:
+            return True
+        if t in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _sanitize_spice_level(v: Any) -> str:
+    t = str(v).strip().lower()
+    if t in {"low", "mild"}:
+        return "low"
+    if t in {"high", "hot"}:
+        return "high"
+    return "medium"
+
+
+def _sanitize_price_sensitivity(v: Any) -> str:
+    t = str(v).strip().lower()
+    if t in {"low", "medium", "high"}:
+        return t
+    return "medium"
+
+
+def _sanitize_role(role: Any) -> str:
+    r = str(role or ROLE_SECONDARY).strip().lower()
+    if r not in VALID_ROLES:
+        return ROLE_SECONDARY
+    return r
+
+
+def ensure_member_profile_defaults(profile: Dict[str, Any], *, role: str) -> Dict[str, Any]:
+    """
+    Ensures expected keys exist and are normalized.
+
+    Rule:
+    - Secondary "hard_excludes" are downgraded to soft_excludes automatically.
+      (Allergies remain as-is and are treated as hard household-wide at merge time.)
+    """
+    base = default_member_profile()
+    merged = base.copy()
+    for k, v in (profile or {}).items():
+        merged[k] = v
+
+    # Migration / alias handling
+    # Older code used "styles" instead of "meal_styles"
+    if "styles" in merged and "meal_styles" not in merged:
+        merged["meal_styles"] = merged.get("styles")
+    # Normalize both
+    merged.pop("styles", None)
+
+    merged["eats_meat"] = _sanitize_bool(merged.get("eats_meat", True), True)
+    merged["eats_fish"] = _sanitize_bool(merged.get("eats_fish", True), True)
+    merged["eats_dairy"] = _sanitize_bool(merged.get("eats_dairy", True), True)
+    merged["eats_eggs"] = _sanitize_bool(merged.get("eats_eggs", True), True)
+
+    merged["excluded_proteins"] = _sanitize_list(merged.get("excluded_proteins", []))
+
+    # Normalize weights
+    weights_raw = merged.get("preferred_protein_weights", {}) or {}
+    weights: Dict[str, float] = {}
+    if isinstance(weights_raw, dict):
+        for k, v in weights_raw.items():
+            key = str(k).strip().lower()
+            try:
+                w = float(v)
+            except Exception:
+                w = 1.0
+            if w < 0.25:
+                w = 0.25
+            if w > 3.0:
+                w = 3.0
+            if key:
+                weights[key] = w
+    merged["preferred_protein_weights"] = weights
+
+    merged["allergies"] = _sanitize_list(merged.get("allergies", []))
+    merged["hard_excludes"] = _sanitize_list(merged.get("hard_excludes", []))
+    merged["soft_excludes"] = _sanitize_list(merged.get("soft_excludes", []))
+
+    merged["favorite_cuisines"] = _sanitize_list(merged.get("favorite_cuisines", []))
+    merged["spice_level"] = _sanitize_spice_level(merged.get("spice_level", "medium"))
+    merged["meal_styles"] = _sanitize_list(merged.get("meal_styles", []))
+
+    merged["oils_allowed"] = _sanitize_list(merged.get("oils_allowed", []))
+
+    # Legacy fields
+    diet = str(merged.get("diet", "meat eater")).strip().lower()
+    merged["diet"] = diet if diet in _VALID_DIETS else "meat eater"
+    merged["favorite_tags"] = _sanitize_list(merged.get("favorite_tags", []))
+    merged["price_sensitivity"] = _sanitize_price_sensitivity(merged.get("price_sensitivity", "medium"))
+
+    # Role rule: secondary "hard excludes" behave as soft excludes
+    role = _sanitize_role(role)
+    if role != ROLE_MASTER:
+        if merged["hard_excludes"]:
+            merged["soft_excludes"] = sorted(set(merged["soft_excludes"] + merged["hard_excludes"]))
+            merged["hard_excludes"] = []
+
+    return merged
+
+
+def _ensure_household_defaults(h: Household) -> Household:
+    """
+    Ensures:
+    - at least one member exists
+    - there is exactly one master (or at least one), tied to primary if possible
+    - active/primary ids are valid
+    - profiles are normalized
+    """
+    if not h.members:
+        h.members = [
+            HouseholdMember(
+                id=1,
+                name="Primary",
+                role=ROLE_MASTER,
+                profile=default_member_profile(),
+            )
+        ]
+
+    # Ensure there is at least one master
+    masters = [m for m in h.members if _sanitize_role(m.role) == ROLE_MASTER]
+    if not masters:
+        # Promote primary if present, else first member
+        for m in h.members:
+            if m.id == h.primary_member_id:
+                m.role = ROLE_MASTER
+                break
+        else:
+            h.members[0].role = ROLE_MASTER
+
+    # Validate primary/active
+    ids = {m.id for m in h.members}
+    if h.primary_member_id not in ids:
+        h.primary_member_id = next(iter(sorted(ids)))
+    if h.active_member_id not in ids:
+        h.active_member_id = h.primary_member_id
+
+    # Normalize members
+    for m in h.members:
+        m.role = _sanitize_role(m.role)
+        m.profile = ensure_member_profile_defaults(m.profile or {}, role=m.role)
+
+    return h
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers for JSON I/O
 # ---------------------------------------------------------------------------
-
 
 def _read_raw_config() -> Dict[str, Any]:
     if not _CONFIG_FILE.exists():
@@ -84,11 +335,8 @@ def _read_raw_config() -> Dict[str, Any]:
     try:
         with _CONFIG_FILE.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict):
-            return data
-        return {}
+        return data if isinstance(data, dict) else {}
     except Exception:
-        # If config is corrupted, start fresh
         return {}
 
 
@@ -97,18 +345,63 @@ def _write_raw_config(data: Dict[str, Any]) -> None:
         json.dump(data, f, indent=2, sort_keys=True)
 
 
+def _member_from_raw(raw: Dict[str, Any]) -> HouseholdMember:
+    try:
+        mid = int(raw.get("id", 0) or 0)
+    except Exception:
+        mid = 0
+    name = str(raw.get("name", "") or "Member").strip() or "Member"
+    role = _sanitize_role(raw.get("role", ROLE_SECONDARY))
+    profile = raw.get("profile", {}) if isinstance(raw.get("profile", {}), dict) else {}
+    return HouseholdMember(id=mid, name=name, role=role, profile=profile)
+
+
+def _household_from_raw(raw: Dict[str, Any]) -> Household:
+    try:
+        primary = int(raw.get("primary_member_id", 1) or 1)
+    except Exception:
+        primary = 1
+    try:
+        active = int(raw.get("active_member_id", primary) or primary)
+    except Exception:
+        active = primary
+
+    members_raw = raw.get("members", [])
+    members: List[HouseholdMember] = []
+    if isinstance(members_raw, list):
+        for m in members_raw:
+            if isinstance(m, dict):
+                members.append(_member_from_raw(m))
+
+    return Household(primary_member_id=primary, active_member_id=active, members=members)
+
+
 def _from_raw_config(raw: Dict[str, Any]) -> UserConfig:
-    """
-    Convert dict -> UserConfig, applying defaults if keys are missing.
-    """
-    return UserConfig(
-        postal_code=raw.get("postal_code", "") or "",
-        city=raw.get("city", "") or "",
-        country=raw.get("country", "") or "CA",
+    cfg = UserConfig(
+        profile_version=int(raw.get("profile_version", raw.get("version", PROFILE_VERSION)) or PROFILE_VERSION),
+        postal_code=str(raw.get("postal_code", "") or ""),
+        city=str(raw.get("city", "") or ""),
+        country=str(raw.get("country", "") or "CA"),
         store_priority=raw.get("store_priority", {}) or {},
         favorite_store_ids=raw.get("favorite_store_ids", []) or [],
-        profile=raw.get("profile", {}) or {},
+        household=_household_from_raw(raw.get("household", {}) or {}),
     )
+
+    # Migration: older configs may only have a top-level "profile"
+    legacy_profile = raw.get("profile")
+    if legacy_profile and isinstance(legacy_profile, dict):
+        if not cfg.household.members:
+            cfg.household.members = [
+                HouseholdMember(id=1, name="Primary", role=ROLE_MASTER, profile=legacy_profile)
+            ]
+            cfg.household.primary_member_id = 1
+            cfg.household.active_member_id = 1
+
+    cfg.household = _ensure_household_defaults(cfg.household)
+
+    # Always bump to latest version on load (safe)
+    cfg.profile_version = PROFILE_VERSION
+    return cfg
 
 
 def _to_raw_config(cfg: UserConfig) -> Dict[str, Any]:
@@ -119,313 +412,223 @@ def _to_raw_config(cfg: UserConfig) -> Dict[str, Any]:
 # Public config API
 # ---------------------------------------------------------------------------
 
-
 def load_config() -> UserConfig:
-    """
-    Load full config from JSON, filling in missing profile fields if needed.
-    """
     raw = _read_raw_config()
     cfg = _from_raw_config(raw)
-
-    # Ensure profile has all expected keys
-    if not cfg.profile:
-        cfg.profile = default_profile()
-    else:
-        cfg.profile = ensure_profile_defaults(cfg.profile)
-
     return cfg
 
 
 def save_config(cfg: UserConfig) -> None:
-    """
-    Persist the entire config to disk.
-    """
-    raw = _to_raw_config(cfg)
-    _write_raw_config(raw)
+    _write_raw_config(_to_raw_config(cfg))
 
 
-# --- Postal code / region -----------------------------------------------
+# ---------------------------------------------------------------------------
+# Household / members API
+# ---------------------------------------------------------------------------
+
+def list_members() -> List[HouseholdMember]:
+    return load_config().household.members
 
 
-def get_postal_code() -> str:
-    return load_config().postal_code
-
-
-def set_postal_code(postal_code: str) -> None:
+def get_member(member_id: int) -> Optional[HouseholdMember]:
     cfg = load_config()
-    pc = postal_code.strip().upper()
-    if pc and not validate_postal(pc):
-        raise ValueError(f"Invalid postal code format: {postal_code!r}")
-    cfg.postal_code = pc
-    save_config(cfg)
+    for m in cfg.household.members:
+        if m.id == member_id:
+            return m
+    return None
 
 
-def get_city() -> str:
-    return load_config().city
-
-
-def set_city(city: str) -> None:
+def get_primary_member() -> HouseholdMember:
     cfg = load_config()
-    cfg.city = city.strip()
-    save_config(cfg)
+    for m in cfg.household.members:
+        if m.id == cfg.household.primary_member_id:
+            return m
+    return cfg.household.members[0]
 
 
-def get_country() -> str:
-    return load_config().country or "CA"
-
-
-def set_country(country: str) -> None:
+def get_master_member() -> HouseholdMember:
     cfg = load_config()
-    cfg.country = country.strip().upper() or "CA"
-    save_config(cfg)
+    for m in cfg.household.members:
+        if m.role == ROLE_MASTER:
+            return m
+    return get_primary_member()
 
 
-# --- Store preferences ---------------------------------------------------
-
-
-def get_store_priority_map() -> Dict[str, int]:
-    """
-    Returns a mapping of store_name -> priority (int).
-    Higher priority means more preferred when prices are similar.
-    """
-    return load_config().store_priority.copy()
-
-
-def set_store_priority_map(priority_map: Dict[str, int]) -> None:
+def get_active_member() -> HouseholdMember:
     cfg = load_config()
-    cfg.store_priority = priority_map or {}
-    save_config(cfg)
+    for m in cfg.household.members:
+        if m.id == cfg.household.active_member_id:
+            return m
+    return get_primary_member()
 
 
-def set_store_priority(store_name: str, priority: int) -> None:
+def set_active_member_id(member_id: int) -> None:
     cfg = load_config()
-    name = store_name.strip()
-    if not name:
-        return
-    if priority < 0:
-        priority = 0
-    cfg.store_priority[name] = priority
-    save_config(cfg)
-    
-    
-def get_store_priority(store_name: Optional[str] = None, default: int = 0) -> int:
-    """
-    Return a store priority for a given store name.
-
-    If store_name is None/blank, returns default.
-    Uses the store_priority dict in user_config.json.
-    """
-    if not store_name:
-        return int(default)
-
-    name = store_name.strip()
-    if not name:
-        return int(default)
-
-    priority_map = load_config().store_priority or {}
-    try:
-        return int(priority_map.get(name, default))
-    except Exception:
-        return int(default)
-
-
-def get_favorite_store_ids() -> List[int]:
-    return list(load_config().favorite_store_ids)
-
-
-def set_favorite_store_ids(store_ids: List[int]) -> None:
-    cfg = load_config()
-    cfg.favorite_store_ids = [int(sid) for sid in store_ids]
-    save_config(cfg)
-
-def get_store_priority(store_name: Optional[str] = None, default: int = 0) -> int:
-    """
-    Return the priority for a store name from the user_config.json store_priority map.
-    If store_name is None/blank, returns default.
-    """
-    if not store_name:
-        return int(default)
-
-    name = str(store_name).strip()
-    if not name:
-        return int(default)
-
-    priority_map = load_config().store_priority or {}
-    try:
-        return int(priority_map.get(name, default))
-    except Exception:
-        return int(default)
-
-def cache_get(key: str, default: Any = None) -> Any:
-    """
-    Lightweight JSON-backed cache.
-    Stored under cfg.profile["_cache"] (a dict).
-    """
-    if not key:
-        return default
-    cfg = load_config()
-    profile = cfg.profile or {}
-    if not isinstance(profile, dict):
-        return default
-    cache = profile.get("_cache", {})
-    if not isinstance(cache, dict):
-        return default
-    return cache.get(key, default)
-
-
-def cache_set(key: str, value: Any) -> None:
-    """
-    Lightweight JSON-backed cache setter.
-    Stored under cfg.profile["_cache"] (a dict).
-    """
-    if not key:
-        return
-    cfg = load_config()
-    if not cfg.profile:
-        cfg.profile = default_profile()
-    if not isinstance(cfg.profile, dict):
-        cfg.profile = default_profile()
-
-    cache = cfg.profile.get("_cache")
-    if not isinstance(cache, dict):
-        cache = {}
-        cfg.profile["_cache"] = cache
-
-    cache[key] = value
-    save_config(cfg)
-
-
-def cache_delete(key: str) -> None:
-    if not key:
-        return
-    cfg = load_config()
-    profile = cfg.profile or {}
-    cache = profile.get("_cache", {}) if isinstance(profile, dict) else {}
-    if isinstance(cache, dict) and key in cache:
-        del cache[key]
-        profile["_cache"] = cache
-        cfg.profile = profile
+    ids = {m.id for m in cfg.household.members}
+    if member_id in ids:
+        cfg.household.active_member_id = int(member_id)
         save_config(cfg)
 
-# --- User profile --------------------------------------------------------
 
-
-def default_profile() -> Dict[str, Any]:
-    """
-    Base shape of the user profile for Grocery Sense.
-
-    This is *the* canonical structure both apps should aim to share.
-    """
-    return {
-        "diet": "meat eater",            # or "vegetarian", "vegan", etc.
-        "allergies": [],                 # e.g. ["peanut", "shellfish"]
-        "avoid_ingredients": [],         # general dislikes or intolerances
-        "restrictions": [],              # e.g. ["no_pork", "no_beef"]
-        "disliked_ingredients": [],      # softer dislikes
-        "prefer_meats": [],              # e.g. ["chicken", "fish"]
-        "avoid_meats": [],               # e.g. ["lamb"]
-        "favorite_cuisines": [],         # e.g. ["italian", "mexican"]
-        "favorite_tags": [],             # e.g. ["under_30_min", "high-protein"]
-        "price_sensitivity": "medium",   # "low" | "medium" | "high"
-    }
-
-
-def ensure_profile_defaults(profile: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Fill in any missing keys in an existing profile with defaults.
-    """
-    base = default_profile()
-    merged = base.copy()
-    for k, v in profile.items():
-        merged[k] = v
-    # Normalize some fields
-    diet = str(merged.get("diet", "")).lower()
-    if not validate_diet(diet):
-        diet = "meat eater"
-    merged["diet"] = diet
-    merged["allergies"] = sanitize_list_input_list(merged.get("allergies", []))
-    merged["avoid_ingredients"] = sanitize_list_input_list(merged.get("avoid_ingredients", []))
-    merged["disliked_ingredients"] = sanitize_list_input_list(merged.get("disliked_ingredients", []))
-    merged["restrictions"] = sanitize_list_input_list(merged.get("restrictions", []))
-    merged["prefer_meats"] = sanitize_list_input_list(merged.get("prefer_meats", []))
-    merged["avoid_meats"] = sanitize_list_input_list(merged.get("avoid_meats", []))
-    merged["favorite_cuisines"] = sanitize_list_input_list(merged.get("favorite_cuisines", []))
-    merged["favorite_tags"] = sanitize_list_input_list(merged.get("favorite_tags", []))
-    sensitivity = str(merged.get("price_sensitivity", "medium")).lower()
-    if sensitivity not in {"low", "medium", "high"}:
-        sensitivity = "medium"
-    merged["price_sensitivity"] = sensitivity
-    return merged
-
-
-def get_user_profile() -> Dict[str, Any]:
+def set_primary_member_id(member_id: int) -> None:
     cfg = load_config()
-    # load_config already ensures defaults
-    return cfg.profile.copy()
+    ids = {m.id for m in cfg.household.members}
+    if member_id in ids:
+        cfg.household.primary_member_id = int(member_id)
+        save_config(cfg)
 
 
-def save_user_profile(profile: Dict[str, Any]) -> None:
-    """
-    Save a new profile, merging with defaults + validation.
-    """
+def add_member(name: str, role: str = ROLE_SECONDARY) -> HouseholdMember:
     cfg = load_config()
-    cfg.profile = ensure_profile_defaults(profile or {})
+    role = _sanitize_role(role)
+
+    next_id = max((m.id for m in cfg.household.members), default=0) + 1
+    member = HouseholdMember(
+        id=next_id,
+        name=(name or "").strip() or f"Member {next_id}",
+        role=role,
+        profile=ensure_member_profile_defaults({}, role=role),
+    )
+    cfg.household.members.append(member)
     save_config(cfg)
+    return member
 
 
-def update_user_profile(**updates: Any) -> Dict[str, Any]:
+def rename_member(member_id: int, new_name: str) -> None:
+    cfg = load_config()
+    for m in cfg.household.members:
+        if m.id == member_id:
+            m.name = (new_name or "").strip() or m.name
+            save_config(cfg)
+            return
+
+
+def delete_member(member_id: int) -> bool:
     """
-    Convenience: update a few keys in the profile and return the result.
+    Returns True if deleted. Will not delete the last remaining member.
+    If deleting the primary/active, reassigns.
     """
-    profile = get_user_profile()
-    profile.update(updates)
-    save_user_profile(profile)
-    return profile
+    cfg = load_config()
+    if len(cfg.household.members) <= 1:
+        return False
+
+    remaining = [m for m in cfg.household.members if m.id != member_id]
+    if len(remaining) == len(cfg.household.members):
+        return False
+
+    cfg.household.members = remaining
+    ids = {m.id for m in remaining}
+    if cfg.household.primary_member_id not in ids:
+        cfg.household.primary_member_id = remaining[0].id
+    if cfg.household.active_member_id not in ids:
+        cfg.household.active_member_id = cfg.household.primary_member_id
+
+    # Ensure we still have a master
+    masters = [m for m in cfg.household.members if m.role == ROLE_MASTER]
+    if not masters:
+        cfg.household.members[0].role = ROLE_MASTER
+
+    save_config(cfg)
+    return True
+
+
+def get_member_profile(member_id: int) -> Dict[str, Any]:
+    cfg = load_config()
+    for m in cfg.household.members:
+        if m.id == member_id:
+            return dict(m.profile or {})
+    return {}
+
+
+def save_member_profile(member_id: int, profile: Dict[str, Any]) -> None:
+    cfg = load_config()
+    for m in cfg.household.members:
+        if m.id == member_id:
+            m.profile = ensure_member_profile_defaults(profile or {}, role=m.role)
+            save_config(cfg)
+            return
 
 
 # ---------------------------------------------------------------------------
-# Utility functions (ported from user_profile_tools)
+# Convenience / safety helpers
 # ---------------------------------------------------------------------------
 
+def is_master(member_id: int) -> bool:
+    m = get_member(member_id)
+    return bool(m and m.role == ROLE_MASTER)
 
-def sanitize_list_input(raw_input: str) -> List[str]:
+
+def get_household_allergies() -> Set[str]:
     """
-    Convert a comma-separated input string into a list of
-    lowercased, stripped tokens.
+    Returns union of all member allergies (canonical lowercase tokens).
     """
-    if not isinstance(raw_input, str):
-        return []
-    return [item.strip().lower() for item in raw_input.split(",") if item.strip()]
+    cfg = load_config()
+    out: Set[str] = set()
+    for m in cfg.household.members:
+        prof = m.profile or {}
+        vals = prof.get("allergies", [])
+        if isinstance(vals, list):
+            for v in vals:
+                s = str(v).strip().lower()
+                if s:
+                    out.add(s)
+        elif isinstance(vals, str):
+            for v in vals.split(","):
+                s = v.strip().lower()
+                if s:
+                    out.add(s)
+    return out
 
 
-def sanitize_list_input_list(values: Any) -> List[str]:
+def reset_secondary_member_to_household_baseline(member_id: int) -> bool:
     """
-    Normalize a list-like input into clean, lowercased strings.
-    Accepts:
-        - list of strings
-        - comma-separated string
+    Clears SECONDARY member overrides back to baseline while preserving allergies.
+    Returns True if reset occurred.
+
+    - Does nothing for master member.
     """
-    if isinstance(values, str):
-        return sanitize_list_input(values)
-    if isinstance(values, list):
-        return [str(v).strip().lower() for v in values if str(v).strip()]
-    return []
-
-
-def validate_diet(diet: str) -> bool:
-    if not isinstance(diet, str):
+    cfg = load_config()
+    master = get_master_member()
+    if member_id == master.id:
         return False
-    return diet.lower() in _VALID_DIETS
 
+    target: Optional[HouseholdMember] = None
+    for m in cfg.household.members:
+        if m.id == member_id:
+            target = m
+            break
+    if not target:
+        return False
 
-def validate_postal(postal_code: str) -> bool:
-    """
-    Very light validation: at least 6 chars and starts with a letter.
-    This is enough for Canadian-style postal codes at this stage.
-    """
-    if not isinstance(postal_code, str):
+    if target.role != ROLE_SECONDARY:
         return False
-    pc = postal_code.strip().replace(" ", "")
-    if len(pc) < 6:
-        return False
-    return pc[0].isalpha()
+
+    prof = target.profile or {}
+    allergies = _sanitize_list(prof.get("allergies", []))
+
+    # Keep only allergies after reset (and keep legacy keys minimal)
+    new_prof = default_member_profile()
+    # Secondary baseline should not carry master-only hard_excludes
+    new_prof["hard_excludes"] = []
+    new_prof["soft_excludes"] = []
+    new_prof["excluded_proteins"] = []
+    new_prof["preferred_protein_weights"] = {}
+    new_prof["favorite_cuisines"] = []
+    new_prof["meal_styles"] = []
+    new_prof["oils_allowed"] = []
+    new_prof["spice_level"] = "medium"
+
+    # Keep dietary toggles inherited implicitly through baseline logic,
+    # but for member profile we can leave them at defaults.
+    new_prof["eats_meat"] = True
+    new_prof["eats_fish"] = True
+    new_prof["eats_dairy"] = True
+    new_prof["eats_eggs"] = True
+
+    # Restore allergies
+    new_prof["allergies"] = allergies
+
+    # Normalize per role rules
+    target.profile = ensure_member_profile_defaults(new_prof, role=target.role)
+    save_config(cfg)
+    return True

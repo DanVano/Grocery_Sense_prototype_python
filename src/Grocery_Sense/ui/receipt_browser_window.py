@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fileinput import filename
+# from fileinput import filename
 import json
 import tkinter as tk
 from tkinter import ttk, messagebox
