@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from Grocery_Sense import config_store
 from Grocery_Sense.services import preferences_service
@@ -49,9 +49,11 @@ class _ListEditor(ttk.Frame):
         on_changed: Callable[[], None],
         height: int = 7,
         hint: str = "",
+        validate_add: Optional[Callable[[str], Optional[str]]] = None,
     ) -> None:
         super().__init__(master)
         self._on_changed = on_changed
+        self._validate_add = validate_add
 
         ttk.Label(self, text=title, font=("Segoe UI", 10, "bold")).pack(anchor="w")
         if hint:
@@ -69,6 +71,7 @@ class _ListEditor(ttk.Frame):
 
         btns = ttk.Frame(self)
         btns.pack(fill="x", pady=(6, 0))
+
         self._btn_add = ttk.Button(btns, text="Add", command=self._add)
         self._btn_remove = ttk.Button(btns, text="Remove", command=self._remove)
         self._btn_add.pack(side="left")
@@ -116,6 +119,14 @@ class _ListEditor(ttk.Frame):
         s = raw.strip().lower()
         if not s:
             return
+
+        # NEW: validate hook
+        if self._validate_add:
+            err = self._validate_add(s)
+            if err:
+                messagebox.showwarning("Not allowed", err, parent=self)
+                return
+
         if s not in self._values:
             self._values.append(s)
             self._values.sort()
@@ -131,6 +142,7 @@ class _ListEditor(ttk.Frame):
             self._values.pop(idx)
             self._render()
             self._on_changed()
+
 
 
 def _profile_get_styles(profile: Dict[str, Any]) -> List[str]:
@@ -185,14 +197,15 @@ class PreferencesWizardWindow(tk.Toplevel):
         self._editor_member = config_store.get_member(editor_member_id or config_store.get_active_member().id) or config_store.get_active_member()
         self._editor_member_id = int(self._editor_member.id)
 
-        # Wizard selection list based on permissions
-        editable_ids = preferences_service.list_editable_member_ids(self._editor_member_id)
-        self._editable_member_ids = editable_ids
-        self._editable_members = [config_store.get_member(mid) for mid in editable_ids]
+        # Editable targets: master can edit anyone; secondary only themselves
+        self._editable_member_ids = self._compute_editable_member_ids(self._editor_member_id)
+        self._editable_members = [config_store.get_member(mid) for mid in self._editable_member_ids]
         self._editable_members = [m for m in self._editable_members if m is not None]
 
         # Choose initial target (must be allowed)
-        target_id = initial_member_id if initial_member_id in editable_ids else (editable_ids[0] if editable_ids else None)
+        target_id = initial_member_id if initial_member_id in self._editable_member_ids else (
+            self._editable_member_ids[0] if self._editable_member_ids else None
+        )
         if target_id is None and config_store.list_members():
             target_id = config_store.get_active_member().id
 
@@ -244,6 +257,47 @@ class PreferencesWizardWindow(tk.Toplevel):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    # ---------- Permissions (NO dependencies on preferences_service) ----------
+
+    def _compute_editable_member_ids(self, editor_member_id: int) -> List[int]:
+        editor = config_store.get_member(editor_member_id) or config_store.get_active_member()
+        if editor.role == config_store.ROLE_MASTER:
+            return [m.id for m in config_store.list_members()]
+        return [editor.id]
+
+    def _can_edit_target(self, target_member_id: int) -> bool:
+        editor = config_store.get_member(self._editor_member_id) or config_store.get_active_member()
+        if editor.role == config_store.ROLE_MASTER:
+            return True
+        return int(editor.id) == int(target_member_id)
+
+    # ---------- Baseline hard excludes set (used for Step 5 UI + validation) ----------
+
+    def _baseline_hard_excludes_set(self) -> Set[str]:
+        baseline = preferences_service.get_household_baseline_profile()
+        raw = baseline.get("hard_excludes", []) or []
+        out: Set[str] = set()
+        for x in raw:
+            s = str(x).strip().lower()
+            if s:
+                out.add(s)
+        return out
+
+    def _validate_soft_exclude_add(self, value: str) -> Optional[str]:
+        """
+        NEW: When editing a secondary member, block adding items already in household hard excludes.
+        """
+        tgt = config_store.get_member(self._target_member_id)
+        if not tgt:
+            return None
+        if tgt.role == config_store.ROLE_MASTER:
+            return None
+
+        baseline_hard = self._baseline_hard_excludes_set()
+        if value in baseline_hard:
+            return f"'{value}' is already a household hard exclude (baseline). It’s redundant to add it as a soft exclude."
+        return None
+
     # ---------- UI shell ----------
 
     def _build_ui(self) -> None:
@@ -279,7 +333,6 @@ class PreferencesWizardWindow(tk.Toplevel):
         self._btn_next.pack(side="right", padx=(0, 8))
 
     def _build_steps(self) -> None:
-        # Create and store step frames
         self._steps.clear()
         self._step_titles.clear()
 
@@ -307,7 +360,6 @@ class PreferencesWizardWindow(tk.Toplevel):
         self._steps.append(self._step_styles_review(self._body))
         self._step_titles.append("8/8  Style + Review")
 
-        # Hide all steps initially
         for f in self._steps:
             f.grid_forget()
 
@@ -315,7 +367,6 @@ class PreferencesWizardWindow(tk.Toplevel):
         if idx < 0 or idx >= len(self._steps):
             return
 
-        # Hide current
         for f in self._steps:
             f.grid_forget()
 
@@ -327,7 +378,6 @@ class PreferencesWizardWindow(tk.Toplevel):
         self._btn_back.configure(state="disabled" if idx == 0 else "normal")
         self._btn_next.configure(text="Save" if idx == len(self._steps) - 1 else "Next")
 
-        # Step-specific UI refresh
         if idx == 0:
             self._refresh_choose_member_step()
         if idx == 4:
@@ -359,14 +409,14 @@ class PreferencesWizardWindow(tk.Toplevel):
         self._target_combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
         self._target_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_target_changed_from_combo())
 
-        self._baseline_note = ttk.Label(
+        ttk.Label(
             f,
-            text="Household baseline = Master profile. Secondary preferences become soft excludes (shown with '*'). Allergies are always hard excludes for everyone.",
+            text="Household baseline = Master profile.\n"
+                 "• Secondary preferences become soft excludes (still allowed, flagged with '*').\n"
+                 "• Allergies are always hard excludes for everyone.",
             foreground="#666",
-            wraplength=920,
             justify="left",
-        )
-        self._baseline_note.grid(row=1, column=0, sticky="w", pady=(12, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(12, 0))
 
         btn_row = ttk.Frame(f)
         btn_row.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -490,17 +540,16 @@ class PreferencesWizardWindow(tk.Toplevel):
         f = ttk.Frame(master, padding=10)
         f.columnconfigure(0, weight=1)
 
-        self._excludes_note = ttk.Label(
+        ttk.Label(
             f,
             text="Step 5: Ingredient excludes\n"
                  "• Master hard excludes = never show at all.\n"
-                 "• Secondary excludes = soft excludes (still allowed, but flagged with '*').",
+                 "• Secondary excludes = soft excludes (still allowed, but flagged with '*').\n"
+                 "• NEW: Secondary members cannot add items already hard-excluded by the household baseline (redundant).",
             foreground="#666",
             justify="left",
-        )
-        self._excludes_note.grid(row=0, column=0, sticky="w", pady=(0, 10))
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
 
-        # For secondary: show household hard excludes as read-only
         ro = ttk.LabelFrame(f, text="Household hard excludes (baseline)", padding=10)
         ro.grid(row=1, column=0, sticky="ew")
         ro.columnconfigure(0, weight=1)
@@ -509,7 +558,6 @@ class PreferencesWizardWindow(tk.Toplevel):
         self._household_hard_excludes_lb.grid(row=0, column=0, sticky="ew")
         self._household_hard_excludes_lb.configure(state="disabled")
 
-        # Editors:
         editors = ttk.Frame(f)
         editors.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
         editors.columnconfigure(0, weight=1)
@@ -524,12 +572,14 @@ class PreferencesWizardWindow(tk.Toplevel):
         )
         self._hard_editor.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
+        # NEW: validate_add blocks redundant soft excludes for secondary targets
         self._soft_editor = _ListEditor(
             editors,
             title="Soft excludes (still allowed, but deprioritized)",
             hint="Example: tomatoes (if one child dislikes it).",
             on_changed=self._mark_dirty,
             height=7,
+            validate_add=self._validate_soft_exclude_add,
         )
         self._soft_editor.grid(row=0, column=1, sticky="nsew")
 
@@ -595,7 +645,6 @@ class PreferencesWizardWindow(tk.Toplevel):
         f.columnconfigure(0, weight=1)
         f.rowconfigure(3, weight=1)
 
-        # Styles + spice
         top = ttk.LabelFrame(f, text="Step 8: Meal style + spice", padding=10)
         top.grid(row=0, column=0, sticky="ew")
 
@@ -615,7 +664,6 @@ class PreferencesWizardWindow(tk.Toplevel):
                 row=i // 2, column=i % 2, sticky="w", padx=(0, 20), pady=2
             )
 
-        # Review box
         rev = ttk.LabelFrame(f, text="Review", padding=10)
         rev.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
         rev.columnconfigure(0, weight=1)
@@ -636,7 +684,6 @@ class PreferencesWizardWindow(tk.Toplevel):
     # ---------- Step 1 helpers ----------
 
     def _refresh_choose_member_step(self) -> None:
-        # Build combo values
         labels: List[str] = []
         self._label_to_id: Dict[str, int] = {}
         for m in self._editable_members:
@@ -647,18 +694,15 @@ class PreferencesWizardWindow(tk.Toplevel):
 
         self._target_combo["values"] = labels
 
-        # Set current selection label
         current_member = config_store.get_member(self._target_member_id)
         if current_member:
             current_label = next((lab for lab, mid in self._label_to_id.items() if mid == current_member.id), "")
             if current_label:
                 self._target_var.set(current_label)
 
-        # Disable selection if secondary editor
         is_editor_master = self._editor_member.role == config_store.ROLE_MASTER
         self._target_combo.configure(state="readonly" if is_editor_master else "disabled")
 
-        # Reset button only when target is secondary
         tgt = config_store.get_member(self._target_member_id)
         is_target_secondary = bool(tgt) and tgt.role != config_store.ROLE_MASTER
         self._btn_reset_secondary.configure(state="normal" if is_target_secondary else "disabled")
@@ -674,12 +718,10 @@ class PreferencesWizardWindow(tk.Toplevel):
             "You have unsaved changes in the wizard. Switch the editing target anyway?",
             parent=self,
         ):
-            # revert combo
             self._refresh_choose_member_step()
             return
 
-        # Permission guard (should already be enforced by list)
-        if not preferences_service.can_edit_member(self._editor_member_id, mid):
+        if not self._can_edit_target(mid):
             messagebox.showinfo("Restricted", "You do not have permission to edit that member.", parent=self)
             self._refresh_choose_member_step()
             return
@@ -701,10 +743,8 @@ class PreferencesWizardWindow(tk.Toplevel):
         ):
             return
 
-        ok = preferences_service.reset_secondary_member_to_household_baseline(self._target_member_id)
-        if not ok:
-            messagebox.showwarning("Not allowed", "Could not reset this member.", parent=self)
-            return
+        # Your service returns None; we just call it then reload.
+        preferences_service.reset_secondary_member_to_household_baseline(self._target_member_id)
 
         self._dirty = False
         self._load_target_into_vars(self._target_member_id)
@@ -748,6 +788,13 @@ class PreferencesWizardWindow(tk.Toplevel):
         if self._soft_editor:
             self._soft_editor.set_values(list(prof.get("soft_excludes", []) or []))
 
+            # NEW: if target is secondary, remove any redundant entries (baseline hard excludes) from display
+            if member.role != config_store.ROLE_MASTER:
+                baseline_hard = self._baseline_hard_excludes_set()
+                cleaned = [x for x in self._soft_editor.get_values() if x not in baseline_hard]
+                if cleaned != self._soft_editor.get_values():
+                    self._soft_editor.set_values(cleaned)
+
         # Spice + styles
         self._spice_var.set(str(prof.get("spice_level", "medium")).strip().lower() or "medium")
 
@@ -767,13 +814,10 @@ class PreferencesWizardWindow(tk.Toplevel):
 
         # Role gating for master-only
         is_target_master = member.role == config_store.ROLE_MASTER
-        # weights
         self._set_weights_enabled(is_target_master)
-        # hard editor enabled only if target master
         if self._hard_editor:
             self._hard_editor.set_enabled(is_target_master)
 
-        # If on excludes step, refresh read-only list
         self._refresh_excludes_step_readonly_list()
 
     def _collect_profile_from_vars(self) -> Dict[str, Any]:
@@ -790,7 +834,6 @@ class PreferencesWizardWindow(tk.Toplevel):
                 excluded.append(p.lower())
         prof["excluded_proteins"] = excluded
 
-        # Always store weights (config_store will keep/normalize; UI disables editing for secondary)
         weights: Dict[str, float] = {}
         for p in preferences_service.PROTEINS:
             try:
@@ -799,28 +842,23 @@ class PreferencesWizardWindow(tk.Toplevel):
                 weights[p.lower()] = 1.0
         prof["preferred_protein_weights"] = weights
 
-        # list editors (created by step build)
-        if self._allergies_editor:
-            prof["allergies"] = self._allergies_editor.get_values()
-        else:
-            prof["allergies"] = []
+        prof["allergies"] = self._allergies_editor.get_values() if self._allergies_editor else []
 
-        # Hard/soft excludes:
-        # If secondary, we only surface soft excludes; hard excludes will be ignored/shifted by config_store anyway.
-        if self._hard_editor:
-            prof["hard_excludes"] = self._hard_editor.get_values()
-        else:
-            prof["hard_excludes"] = []
-
-        if self._soft_editor:
-            prof["soft_excludes"] = self._soft_editor.get_values()
-        else:
-            prof["soft_excludes"] = []
+        prof["hard_excludes"] = self._hard_editor.get_values() if self._hard_editor else []
+        prof["soft_excludes"] = self._soft_editor.get_values() if self._soft_editor else []
 
         prof["spice_level"] = (self._spice_var.get() or "medium").strip().lower()
         prof["styles"] = [tag for tag, var in self._style_vars.items() if bool(var.get())]
         prof["favorite_cuisines"] = [c for c, var in self._cuisine_vars.items() if bool(var.get())]
         prof["oils_allowed"] = [o for o, var in self._oil_vars.items() if bool(var.get())]
+
+        # NEW: if saving a secondary, strip redundant soft excludes that are already baseline hard excludes
+        tgt = config_store.get_member(self._target_member_id)
+        if tgt and tgt.role != config_store.ROLE_MASTER:
+            baseline_hard = self._baseline_hard_excludes_set()
+            prof["soft_excludes"] = [x for x in prof["soft_excludes"] if x not in baseline_hard]
+            # also: secondary can't set household hard excludes anyway (config_store will sanitize)
+            # but leaving it here is fine; config_store moves secondary hard->soft.
 
         return prof
 
@@ -829,8 +867,8 @@ class PreferencesWizardWindow(tk.Toplevel):
     def _refresh_excludes_step_readonly_list(self) -> None:
         if not self._household_hard_excludes_lb:
             return
-        baseline = preferences_service.get_household_baseline_profile()
-        baseline_hard = sorted(set(str(x).strip().lower() for x in (baseline.get("hard_excludes", []) or []) if str(x).strip()))
+
+        baseline_hard = sorted(self._baseline_hard_excludes_set())
 
         self._household_hard_excludes_lb.configure(state="normal")
         self._household_hard_excludes_lb.delete(0, tk.END)
@@ -841,15 +879,7 @@ class PreferencesWizardWindow(tk.Toplevel):
                 self._household_hard_excludes_lb.insert(tk.END, x)
         self._household_hard_excludes_lb.configure(state="disabled")
 
-        # If target is master, hide/disable the read-only baseline list (baseline == master)
         tgt = config_store.get_member(self._target_member_id)
-        is_target_master = bool(tgt) and tgt.role == config_store.ROLE_MASTER
-        # We can't truly "hide" easily in grid without reflow; we just disable note list for master
-        if is_target_master:
-            # keep it but show baseline is you
-            pass
-
-        # If target is secondary: hard editor should be disabled
         if self._hard_editor and tgt and tgt.role != config_store.ROLE_MASTER:
             self._hard_editor.set_enabled(False)
 
@@ -861,6 +891,7 @@ class PreferencesWizardWindow(tk.Toplevel):
         role = tgt.role if tgt else "unknown"
 
         prof = self._collect_profile_from_vars()
+
         allergies = prof.get("allergies", [])
         hard = prof.get("hard_excludes", [])
         soft = prof.get("soft_excludes", [])
@@ -868,10 +899,9 @@ class PreferencesWizardWindow(tk.Toplevel):
         oils = prof.get("oils_allowed", [])
         styles = prof.get("styles", [])
         spice = prof.get("spice_level", "medium")
-        excluded_proteins = prof.get("excluded_proteins", [])
+        excluded_proteins = set(prof.get("excluded_proteins", []))
 
-        # Show allowed proteins instead of excluded (clearer)
-        allowed_proteins = [p for p in preferences_service.PROTEINS if p.lower() not in set(excluded_proteins)]
+        allowed_proteins = [p for p in preferences_service.PROTEINS if p.lower() not in excluded_proteins]
 
         lines: List[str] = []
         lines.append(f"Editing: {name} ({role})")
@@ -926,7 +956,6 @@ class PreferencesWizardWindow(tk.Toplevel):
             self._show_step(self._step_index + 1)
             return
 
-        # Save on last step
         tgt = config_store.get_member(self._target_member_id)
         if not tgt:
             messagebox.showerror("Error", "Missing target member.", parent=self)
@@ -973,7 +1002,6 @@ class PreferencesWizardWindow(tk.Toplevel):
         eats_meat = bool(self._eats_meat.get())
         eats_fish = bool(self._eats_fish.get())
 
-        # only auto-uncheck; do not auto-recheck on toggle back
         for p in ["chicken", "beef", "pork", "lamb", "turkey"]:
             if p in self._protein_allowed_vars and not eats_meat:
                 self._protein_allowed_vars[p].set(False)
@@ -984,12 +1012,7 @@ class PreferencesWizardWindow(tk.Toplevel):
 
     def _set_weights_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        try:
-            self._weights_frame.configure(text="Master-only: protein preference weights" if enabled else "Protein preference weights (Master only)")
-        except Exception:
-            pass
 
-        # Walk all descendants and set state where supported
         def walk(w: tk.Widget) -> List[tk.Widget]:
             out = [w]
             for c in w.winfo_children():
@@ -1098,7 +1121,6 @@ class PreferencesWindow(tk.Toplevel):
 
         ttk.Button(top, text="Run 8-Step Wizard", command=self._run_wizard_for_selected).pack(side="left", padx=(10, 0))
 
-        # Reset secondary member button
         self.btn_reset_to_baseline = ttk.Button(top, text="Reset to baseline", command=self._reset_selected_secondary_to_baseline)
         self.btn_reset_to_baseline.pack(side="left", padx=(10, 0))
 
@@ -1220,12 +1242,14 @@ class PreferencesWindow(tk.Toplevel):
         self.hard_editor.grid(row=0, column=1, sticky="nsew")
 
         self.soft_editor = _ListEditor(
-            tab,
-            title="Soft excludes (still allowed, but deprioritized; secondary excludes will show with '*')",
-            hint="Example: tomatoes (if one child dislikes it).",
-            on_changed=self._mark_dirty,
-            height=8,
-        )
+    	    tab,
+    	    title="Soft excludes (still allowed, but deprioritized; secondary excludes will show with '*')",
+    	    hint="Example: tomatoes (if one child dislikes it).",
+    	    on_changed=self._mark_dirty,
+    	    height=8,
+    	    validate_add=self._validate_secondary_soft_exclude_add,  # NEW
+	)
+
         self.soft_editor.pack(fill="both", expand=True, pady=(12, 0))
 
     def _build_tab_cuisines_styles(self) -> None:
@@ -1330,7 +1354,6 @@ class PreferencesWindow(tk.Toplevel):
             pri = "★ " if m.id == primary_id else "  "
             self.members_listbox.insert(tk.END, f"{tag}{pri}{m.name}")
 
-        # also update reset button availability
         self._update_reset_button_state()
 
     def _apply_active_member_rules(self) -> None:
@@ -1393,7 +1416,6 @@ class PreferencesWindow(tk.Toplevel):
             return
 
         if self._dirty and not messagebox.askyesno("Unsaved changes", "You have unsaved changes. Switch member anyway?", parent=self):
-            # revert selection back to current editing member
             self.members_listbox.selection_clear(0, tk.END)
             cur_idx = self._current_member_index()
             self.members_listbox.selection_set(cur_idx)
@@ -1429,7 +1451,14 @@ class PreferencesWindow(tk.Toplevel):
 
         self.allergies_editor.set_values(list(prof.get("allergies", []) or []))
         self.hard_editor.set_values(list(prof.get("hard_excludes", []) or []))
+
         self.soft_editor.set_values(list(prof.get("soft_excludes", []) or []))
+	# NEW: If editing a secondary, strip redundant soft excludes that are already household hard excludes
+	if member.role != config_store.ROLE_MASTER:
+    	    baseline_hard = self._baseline_hard_excludes_set()
+    	    cleaned = [x for x in self.soft_editor.get_values() if x not in baseline_hard]
+    	    if cleaned != self.soft_editor.get_values():
+        	self.soft_editor.set_values(cleaned)
 
         self._spice_var.set(str(prof.get("spice_level", "medium")).strip().lower() or "medium")
 
@@ -1447,10 +1476,7 @@ class PreferencesWindow(tk.Toplevel):
 
         is_member_master = member.role == config_store.ROLE_MASTER
         self.hard_editor.set_enabled(is_member_master)
-
-        # Disable weights if not master
         self._set_weights_enabled(is_member_master)
-
         self._update_reset_button_state()
 
     def _set_weights_enabled(self, enabled: bool) -> None:
@@ -1470,7 +1496,6 @@ class PreferencesWindow(tk.Toplevel):
                 pass
 
     def _update_reset_button_state(self) -> None:
-        # enabled only if editing a secondary member
         if self._editing_member_id is None:
             self.btn_reset_to_baseline.configure(state="disabled")
             return
@@ -1494,10 +1519,7 @@ class PreferencesWindow(tk.Toplevel):
         ):
             return
 
-        ok = preferences_service.reset_secondary_member_to_household_baseline(m.id)
-        if not ok:
-            messagebox.showwarning("Not allowed", "Could not reset this member.", parent=self)
-            return
+        preferences_service.reset_secondary_member_to_household_baseline(m.id)
 
         self._dirty = False
         self._reload_members()
@@ -1546,6 +1568,10 @@ class PreferencesWindow(tk.Toplevel):
             return
 
         prof = self._collect_form_profile()
+	# NEW: Enforce redundancy rule on save too
+	if member.role != config_store.ROLE_MASTER:
+    	    baseline_hard = self._baseline_hard_excludes_set()
+    	    prof["soft_excludes"] = [x for x in (prof.get("soft_excludes", []) or []) if x not in baseline_hard]
         config_store.save_member_profile(member.id, prof)
 
         self._dirty = False
@@ -1554,13 +1580,10 @@ class PreferencesWindow(tk.Toplevel):
         self._log_msg(f"Saved preferences for {member.name} (id={member.id})")
 
     def _run_wizard_for_selected(self) -> None:
-        # Wizard Step 1 still allows choosing target, but we pass the current selection.
         active = config_store.get_active_member()
-
         target_id = self._editing_member_id or self._cfg.household.primary_member_id
 
         def _after_save(saved_member_id: int) -> None:
-            # refresh list + reload that member
             self._reload_members()
             self._apply_active_member_rules()
             self._load_member_into_form(saved_member_id)
@@ -1629,6 +1652,42 @@ class PreferencesWindow(tk.Toplevel):
                 self._log(msg)
             except Exception:
                 pass
+    def _baseline_hard_excludes_set(self) -> Set[str]:
+        """
+        Household baseline hard excludes = master hard_excludes.
+        Used to block redundant secondary soft excludes.
+        """
+        baseline = preferences_service.get_household_baseline_profile()
+        raw = baseline.get("hard_excludes", []) or []
+        out: Set[str] = set()
+        for x in raw:
+            s = str(x).strip().lower()
+            if s:
+                out.add(s)
+        return out
+
+
+    def _validate_secondary_soft_exclude_add(self, value: str) -> Optional[str]:
+        """
+        Main screen: when editing a secondary member, prevent adding a soft exclude
+        that is already a household hard exclude (baseline).
+        """
+        if self._editing_member_id is None:
+            return None
+
+        member = config_store.get_member(self._editing_member_id)
+        if not member:
+            return None
+
+        # Only enforce for SECONDARY targets
+        if member.role == config_store.ROLE_MASTER:
+            return None
+
+        baseline_hard = self._baseline_hard_excludes_set()
+        if (value or "").strip().lower() in baseline_hard:
+            return f"'{value}' is already a household hard exclude (baseline). Adding it here is redundant."
+        return None
+
 
 
 def open_preferences_window(master: Optional[tk.Misc] = None, *, log: Optional[Callable[[str], None]] = None) -> PreferencesWindow:
