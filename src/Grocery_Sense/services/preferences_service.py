@@ -1,3 +1,21 @@
+"""
+Grocery_Sense.services.preferences_service
+
+Household Preferences (Master vs Secondary) — source of truth for:
+- Effective household filtering/ranking
+- Soft exclude '*' / strong soft exclude '**' annotations
+- Secondary reset-to-household-baseline behavior
+- UI helper validation (prevent redundant soft-excludes when already hard-excluded)
+
+Key Rules (v1):
+- Household baseline == master profile
+- Allergies (any member) => hard exclude household-wide
+- Master hard_excludes => hard exclude household-wide
+- Secondary excludes => soft exclude (keep item, later star it)
+- Master protein exclusions => hard; secondary protein exclusions => soft
+- Strong soft exclude if many members soft-exclude something (3/5 example)
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -9,24 +27,11 @@ from Grocery_Sense import config_store
 # Canonical option lists (driven by config_store defaults)
 # ---------------------------------------------------------------------------
 
-def _canon_list(values: Any) -> List[str]:
-    if isinstance(values, list):
-        out: List[str] = []
-        for v in values:
-            s = str(v).strip().lower()
-            if s:
-                out.append(s)
-        return out
-    if isinstance(values, str):
-        return [v.strip().lower() for v in values.split(",") if v.strip()]
-    return []
+PROTEINS: List[str] = list(getattr(config_store, "DEFAULT_PROTEINS", []))
+OILS: List[str] = list(getattr(config_store, "DEFAULT_OILS", []))
+CUISINES: List[str] = list(getattr(config_store, "DEFAULT_CUISINES", []))
 
-
-PROTEINS: List[str] = _canon_list(getattr(config_store, "DEFAULT_PROTEINS", []))
-OILS: List[str] = _canon_list(getattr(config_store, "DEFAULT_OILS", []))
-CUISINES: List[str] = _canon_list(getattr(config_store, "DEFAULT_CUISINES", []))
-
-# For UI (wizard/preferences screen). Key = stored token, Value = label.
+# For the UI (wizard/preferences screen). Key = stored token, Value = label.
 STYLE_TAGS: List[Tuple[str, str]] = [
     ("soups_stews", "Soups & stews"),
     ("saucy", "Saucy meals"),
@@ -35,29 +40,24 @@ STYLE_TAGS: List[Tuple[str, str]] = [
     ("meal_prep", "Meal prep-friendly"),
 ]
 
-# Protein group tokens MUST match config_store.DEFAULT_PROTEINS
+# Protein groups for branching (eat meat? fish/seafood?)
 MEAT_PROTEINS: Set[str] = {"chicken", "beef", "pork", "lamb", "turkey"}
 SEAFOOD_PROTEINS: Set[str] = {"fish", "shellfish"}
-PLANT_PROTEINS: Set[str] = {"plant proteins"}
+PLANT_PROTEINS: Set[str] = {"plant proteins", "plant_proteins"}
 
-# Keys considered “secondary overrides”.
-# Reset-to-baseline should clear these but preserve allergies.
+# Keys we consider "preference overrides" for secondaries.
+# Reset-to-baseline should clear these but keep allergies.
 _SECONDARY_OVERRIDE_KEYS: Set[str] = {
-    "diet_flags",  # optional (future)
-    "hard_excludes",  # secondary 'hard' becomes soft downstream, but still safe to clear if present
+    "diet_flags",
+    "hard_excludes",  # may exist in older configs; secondary hard treated as soft
     "soft_excludes",
     "excluded_proteins",
     "preferred_protein_weights",
     "favorite_cuisines",
     "oils_allowed",
     "spice_level",
-    "meal_styles",
-    # flags exist in profiles but we treat baseline as master anyway; if a secondary overrides them later,
-    # they should be considered overrides too:
-    "eats_meat",
-    "eats_fish",
-    "eats_dairy",
-    "eats_eggs",
+    "styles",  # canonical key used by config_store + preferences_window
+    "meal_styles",  # legacy key (older code); cleared too if present
 }
 
 
@@ -70,55 +70,84 @@ class EffectivePreferences:
     """
     Effective household preferences used for filtering/ranking.
 
-    FINAL RULES:
-    - Household baseline == master profile (master defaults)
-    - Allergies (any member) => household hard exclude
-    - Master hard_excludes => household hard exclude
-    - Secondary excludes => soft exclude (keep item, later star it)
-    - Master protein exclusions => hard; secondary protein exclusions => soft
-    - Protein weights/cuisines/oils come from baseline (master)
-    - oils_allowed: if empty => treat as "all allowed"
+    hard_excludes:
+      - allergies (any member)
+      - master hard_excludes
+
+    soft_excludes:
+      - master soft_excludes (tracked, but NOT starred)
+      - secondary soft_excludes + any secondary hard_excludes (treated as soft)
+
+    strong_soft_excludes:
+      - subset of soft_excludes where many SECONDARY members agree
+
+    excluded_proteins_hard:
+      - master excluded_proteins
+
+    excluded_proteins_soft:
+      - secondary excluded_proteins (tracked & starred)
+
+    strong_soft_proteins:
+      - subset where many SECONDARY members agree
+
+    protein_weights/cuisines/oils:
+      - baseline (master)
     """
     hard_excludes: Set[str] = field(default_factory=set)
 
-    soft_excludes: Dict[str, List[str]] = field(default_factory=dict)
+    soft_excludes: Dict[str, List[str]] = field(default_factory=dict)  # ingredient -> member names
+    soft_exclude_counts: Dict[str, int] = field(default_factory=dict)  # ingredient -> secondary count
+    strong_soft_excludes: Set[str] = field(default_factory=set)
 
     excluded_proteins_hard: Set[str] = field(default_factory=set)
-    excluded_proteins_soft: Dict[str, List[str]] = field(default_factory=dict)
+    excluded_proteins_soft: Dict[str, List[str]] = field(default_factory=dict)  # protein -> member names
+    soft_protein_exclude_counts: Dict[str, int] = field(default_factory=dict)  # protein -> secondary count
+    strong_soft_proteins: Set[str] = field(default_factory=set)
 
     protein_weights: Dict[str, float] = field(default_factory=dict)
-
     cuisines_preferred: Set[str] = field(default_factory=set)
-    oils_allowed: Set[str] = field(default_factory=set)
+    oils_allowed: Set[str] = field(default_factory=set)  # empty means "unrestricted"
 
     def is_hard_excluded(self, ingredient: str) -> bool:
-        key = (ingredient or "").strip().lower()
+        key = _norm_token(ingredient)
         return bool(key) and key in self.hard_excludes
 
     def soft_excluders(self, ingredient: str) -> List[str]:
-        key = (ingredient or "").strip().lower()
+        key = _norm_token(ingredient)
         return list(self.soft_excludes.get(key, []))
 
+    def secondary_soft_excluder_count(self, ingredient: str) -> int:
+        key = _norm_token(ingredient)
+        return int(self.soft_exclude_counts.get(key, 0))
+
+    def is_strong_soft_excluded(self, ingredient: str) -> bool:
+        key = _norm_token(ingredient)
+        return bool(key) and key in self.strong_soft_excludes
+
     def soft_protein_excluders(self, protein: str) -> List[str]:
-        key = (protein or "").strip().lower()
+        key = _norm_token(protein)
         return list(self.excluded_proteins_soft.get(key, []))
 
+    def secondary_soft_protein_excluder_count(self, protein: str) -> int:
+        key = _norm_token(protein)
+        return int(self.soft_protein_exclude_counts.get(key, 0))
+
+    def is_strong_soft_protein_excluded(self, protein: str) -> bool:
+        key = _norm_token(protein)
+        return bool(key) and key in self.strong_soft_proteins
+
     def protein_weight(self, protein: str) -> float:
-        key = (protein or "").strip().lower()
+        key = _norm_token(protein)
         try:
             return float(self.protein_weights.get(key, 1.0))
         except Exception:
             return 1.0
 
-    def is_protein_hard_excluded(self, protein: str) -> bool:
-        key = (protein or "").strip().lower()
-        return bool(key) and key in self.excluded_proteins_hard
-
     def is_oil_allowed(self, oil: str) -> bool:
-        key = (oil or "").strip().lower()
+        key = _norm_token(oil)
         if not key:
             return True
-        # If baseline oils_allowed is empty, treat as "all allowed"
+        # empty oils_allowed => unrestricted
         if not self.oils_allowed:
             return True
         return key in self.oils_allowed
@@ -128,8 +157,21 @@ class EffectivePreferences:
 # Normalization helpers
 # ---------------------------------------------------------------------------
 
+def _norm_token(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
 def _norm_list(values: Any) -> List[str]:
-    return _canon_list(values)
+    if isinstance(values, list):
+        out: List[str] = []
+        for v in values:
+            s = _norm_token(v)
+            if s:
+                out.append(s)
+        return out
+    if isinstance(values, str):
+        return [v.strip().lower() for v in values.split(",") if v.strip()]
+    return []
 
 
 def _norm_dict(values: Any) -> Dict[str, Any]:
@@ -139,7 +181,7 @@ def _norm_dict(values: Any) -> Dict[str, Any]:
 
 
 def _add_soft(m: EffectivePreferences, key: str, member_name: str) -> None:
-    k = (key or "").strip().lower()
+    k = _norm_token(key)
     if not k:
         return
     m.soft_excludes.setdefault(k, [])
@@ -148,12 +190,33 @@ def _add_soft(m: EffectivePreferences, key: str, member_name: str) -> None:
 
 
 def _add_soft_protein(m: EffectivePreferences, key: str, member_name: str) -> None:
-    k = (key or "").strip().lower()
+    k = _norm_token(key)
     if not k:
         return
     m.excluded_proteins_soft.setdefault(k, [])
     if member_name not in m.excluded_proteins_soft[k]:
         m.excluded_proteins_soft[k].append(member_name)
+
+
+def _get_master_member():
+    return config_store.get_master_member()
+
+
+def _get_members(cfg) -> List[Any]:
+    try:
+        return list(cfg.household.members or [])
+    except Exception:
+        return []
+
+
+def _find_member(cfg, member_id: int) -> Optional[Any]:
+    for mem in _get_members(cfg):
+        try:
+            if int(mem.id) == int(member_id):
+                return mem
+        except Exception:
+            continue
+    return None
 
 
 def _profile(mem) -> Dict[str, Any]:
@@ -164,52 +227,22 @@ def _profile(mem) -> Dict[str, Any]:
         return {}
 
 
-def _sanitize_bool(v: Any, default: bool = True) -> bool:
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(int(v))
-    if isinstance(v, str):
-        t = v.strip().lower()
-        if t in {"1", "true", "yes", "y", "on"}:
-            return True
-        if t in {"0", "false", "no", "n", "off"}:
-            return False
-    return default
-
-
-# ---------------------------------------------------------------------------
-# Role / baseline helpers (for wizard screen 1)
-# ---------------------------------------------------------------------------
-
-def household_baseline_member_id() -> int:
+def _strong_soft_threshold(n_members: int, s_count: int) -> bool:
     """
-    Household baseline == master profile, so baseline editing = editing master member.
+    Strong soft exclude rule:
+    - N <= 3: strong if S >= 2
+    - N == 4: strong if S >= 3
+    - N >= 5: strong if S >= 3 and S/N >= 0.60
     """
-    return config_store.get_master_member().id
-
-
-def can_edit_member(editor_member_id: int, target_member_id: int) -> bool:
-    """
-    Wizard rule:
-    - Master can edit anyone
-    - Secondary can only edit themselves
-    """
-    editor = config_store.get_member(editor_member_id)
-    if not editor:
+    n = max(int(n_members), 0)
+    s = max(int(s_count), 0)
+    if n <= 0:
         return False
-    if editor.role == getattr(config_store, "ROLE_MASTER", "master"):
-        return True
-    return int(editor_member_id) == int(target_member_id)
-
-
-def list_editable_member_ids(editor_member_id: int) -> List[int]:
-    editor = config_store.get_member(editor_member_id)
-    if not editor:
-        return []
-    if editor.role == getattr(config_store, "ROLE_MASTER", "master"):
-        return [m.id for m in config_store.list_members()]
-    return [editor.id]
+    if n <= 3:
+        return s >= 2
+    if n == 4:
+        return s >= 3
+    return (s >= 3) and ((s / float(n)) >= 0.60)
 
 
 # ---------------------------------------------------------------------------
@@ -227,11 +260,11 @@ def compute_effective_preferences() -> EffectivePreferences:
     - Secondary excludes => soft exclude (keep item, later star it)
     - Master protein exclusions => hard; secondary protein exclusions => soft
     - Protein weights/cuisines/oils come from baseline (master)
-    - eats_meat/eats_fish flags (if used) are respected
+    - Strong soft excludes computed from SECONDARY consensus
     """
     cfg = config_store.load_config()
-    members = list(getattr(cfg.household, "members", []) or [])
-    master = config_store.get_master_member()
+    members = _get_members(cfg)
+    master = _get_master_member()
     master_name = getattr(master, "name", "Master")
 
     eff = EffectivePreferences()
@@ -247,22 +280,14 @@ def compute_effective_preferences() -> EffectivePreferences:
     for x in _norm_list(mprof.get("hard_excludes", [])):
         eff.hard_excludes.add(x)
 
-    # 3) Baseline protein exclusions (master) + baseline flags
+    # 3) Baseline protein exclusions (master) => hard excluded proteins
     for p in _norm_list(mprof.get("excluded_proteins", [])):
         eff.excluded_proteins_hard.add(p)
-
-    eats_meat = _sanitize_bool(mprof.get("eats_meat", True), True)
-    eats_fish = _sanitize_bool(mprof.get("eats_fish", True), True)
-    if not eats_meat:
-        eff.excluded_proteins_hard.update(MEAT_PROTEINS)
-        eff.excluded_proteins_hard.discard("plant proteins")
-    if not eats_fish:
-        eff.excluded_proteins_hard.update(SEAFOOD_PROTEINS)
 
     # 4) Baseline protein weights
     weights = _norm_dict(mprof.get("preferred_protein_weights", {}) or {})
     for k, v in weights.items():
-        key = str(k).strip().lower()
+        key = _norm_token(k)
         if not key:
             continue
         try:
@@ -274,23 +299,17 @@ def compute_effective_preferences() -> EffectivePreferences:
     for c in _norm_list(mprof.get("favorite_cuisines", [])):
         eff.cuisines_preferred.add(c)
 
-    # 6) Baseline oils allowed
-    oils_allowed = _norm_list(mprof.get("oils_allowed", []))
-    if oils_allowed:
-        eff.oils_allowed.update(oils_allowed)
-    else:
-        # empty baseline => all allowed (we keep a filled set for UI friendliness)
-        eff.oils_allowed.update([o for o in OILS if o])
+    # 6) Baseline oils allowed (empty => unrestricted)
+    for o in _norm_list(mprof.get("oils_allowed", [])):
+        eff.oils_allowed.add(o)
 
     # 7) Soft excludes:
-    # - master soft_excludes are tracked (not starred by default)
+    # - master soft_excludes are tracked but NOT starred by default
     for x in _norm_list(mprof.get("soft_excludes", [])):
         _add_soft(eff, x, master_name)
 
-    # - secondary soft excludes (+ any legacy hard_excludes treated as soft)
-    # - secondary excluded_proteins treated as soft protein excludes
+    # - secondary soft excludes, plus secondary "hard_excludes" treated as soft (redundant)
     for mem in members:
-        # skip master
         try:
             if int(mem.id) == int(master.id):
                 continue
@@ -301,104 +320,150 @@ def compute_effective_preferences() -> EffectivePreferences:
         prof = _profile(mem)
         mem_name = getattr(mem, "name", "Member")
 
-        # ingredient excludes
         for x in _norm_list(prof.get("soft_excludes", [])) + _norm_list(prof.get("hard_excludes", [])):
             _add_soft(eff, x, mem_name)
 
-        # protein excludes
         for p in _norm_list(prof.get("excluded_proteins", [])):
             _add_soft_protein(eff, p, mem_name)
 
-        # flags -> protein groups (soft)
-        se_meat = _sanitize_bool(prof.get("eats_meat", True), True)
-        se_fish = _sanitize_bool(prof.get("eats_fish", True), True)
-        if not se_meat:
-            for p in MEAT_PROTEINS:
-                _add_soft_protein(eff, p, mem_name)
-        if not se_fish:
-            for p in SEAFOOD_PROTEINS:
-                _add_soft_protein(eff, p, mem_name)
+    # 8) Strong soft excludes (SECONDARY consensus only)
+    n_members = len(members) if members else 0
+
+    for ing, names in eff.soft_excludes.items():
+        secondary_names = [n for n in names if n != master_name]
+        s_count = len(secondary_names)
+        eff.soft_exclude_counts[ing] = s_count
+        if _strong_soft_threshold(n_members, s_count):
+            eff.strong_soft_excludes.add(ing)
+
+    for prot, names in eff.excluded_proteins_soft.items():
+        secondary_names = [n for n in names if n != master_name]
+        s_count = len(secondary_names)
+        eff.soft_protein_exclude_counts[prot] = s_count
+        if _strong_soft_threshold(n_members, s_count):
+            eff.strong_soft_proteins.add(prot)
 
     return eff
 
 
 # ---------------------------------------------------------------------------
-# Star/annotation helpers (for list + recommendation UI)
+# Annotation helpers (for list + recommendation UI)
 # ---------------------------------------------------------------------------
 
 def get_star_excluders(name: str, eff: Optional[EffectivePreferences] = None) -> List[str]:
     """
-    Returns SECONDARY members who caused the '*' marker for this ingredient.
+    Returns SECONDARY members who caused the marker for this ingredient.
     """
     if eff is None:
         eff = compute_effective_preferences()
 
-    key = (name or "").strip().lower()
+    key = _norm_token(name)
     if not key or key in eff.hard_excludes:
         return []
 
     excluders = eff.soft_excluders(key)
-    master_name = getattr(config_store.get_master_member(), "name", "Master")
+    master_name = getattr(_get_master_member(), "name", "Master")
     return [n for n in excluders if n != master_name]
 
 
-def annotate_name_with_star(name: str, eff: Optional[EffectivePreferences] = None) -> str:
+def get_soft_exclude_marker(name: str, eff: Optional[EffectivePreferences] = None) -> str:
     """
-    Adds '*' if an ingredient is soft-excluded by at least one SECONDARY member.
-    """
-    excluders = get_star_excluders(name, eff=eff)
-    return f"{name}*" if excluders else name
-
-
-def annotate_protein_with_star(protein: str, eff: Optional[EffectivePreferences] = None) -> str:
-    """
-    Adds '*' if a protein is soft-excluded by at least one SECONDARY member.
+    Marker scheme:
+      - ""  => no soft exclude
+      - "*" => soft-excluded by >=1 secondary
+      - "**" => strong soft exclude (many secondaries)
     """
     if eff is None:
         eff = compute_effective_preferences()
 
-    key = (protein or "").strip().lower()
+    key = _norm_token(name)
+    if not key or key in eff.hard_excludes:
+        return ""
+
+    if eff.is_strong_soft_excluded(key) and eff.secondary_soft_excluder_count(key) > 0:
+        return "**"
+
+    if get_star_excluders(key, eff=eff):
+        return "*"
+
+    return ""
+
+
+def annotate_name_with_star(name: str, eff: Optional[EffectivePreferences] = None) -> str:
+    """
+    Backward-compatible name (may now append '*' or '**' depending on consensus).
+    """
+    marker = get_soft_exclude_marker(name, eff=eff)
+    return f"{name}{marker}" if marker else name
+
+
+def annotate_protein_with_star(protein: str, eff: Optional[EffectivePreferences] = None) -> str:
+    """
+    Backward-compatible name (may now append '*' or '**' depending on consensus).
+    """
+    if eff is None:
+        eff = compute_effective_preferences()
+
+    key = _norm_token(protein)
     if not key or key in eff.excluded_proteins_hard:
         return protein
 
-    excluders = eff.soft_protein_excluders(key)
-    master_name = getattr(config_store.get_master_member(), "name", "Master")
-    if any(n != master_name for n in excluders):
-        return f"{protein}*"
-    return protein
+    master_name = getattr(_get_master_member(), "name", "Master")
+    excluders = [n for n in eff.soft_protein_excluders(key) if n != master_name]
+    if not excluders:
+        return protein
+
+    if eff.is_strong_soft_protein_excluded(key):
+        return f"{protein}**"
+    return f"{protein}*"
 
 
 # ---------------------------------------------------------------------------
 # Wizard/Screen helpers: baseline + member effective edit state
 # ---------------------------------------------------------------------------
 
+def get_household_hard_excludes(eff: Optional[EffectivePreferences] = None) -> List[str]:
+    """
+    Household hard excludes = allergies(any) + master hard_excludes.
+    """
+    if eff is None:
+        eff = compute_effective_preferences()
+    return sorted(set([_norm_token(x) for x in eff.hard_excludes if _norm_token(x)]))
+
+
 def get_household_baseline_profile() -> Dict[str, Any]:
     """
     Returns the master profile dict (baseline) with safe defaults applied where useful.
+    Intended for pre-filling UI.
+
+    NOTE: We keep oils_allowed UI-friendly:
+      - empty baseline oils_allowed => show all checked in UI (unrestricted)
     """
-    master = config_store.get_master_member()
+    master = _get_master_member()
     prof = dict(_profile(master))
 
-    # Ensure lists exist + normalized
-    for k in ("hard_excludes", "soft_excludes", "excluded_proteins", "favorite_cuisines", "meal_styles", "allergies"):
-        prof[k] = _norm_list(prof.get(k, []))
-
-    # Ensure weights are dict
+    # Ensure preferred weights exist as dict
     if not isinstance(prof.get("preferred_protein_weights", {}), dict):
         prof["preferred_protein_weights"] = {}
 
-    # Ensure oils_allowed has a default for UI (all oils if unset)
+    # Ensure list keys exist
+    for k in ("hard_excludes", "soft_excludes", "excluded_proteins", "favorite_cuisines", "styles", "allergies"):
+        if k not in prof:
+            prof[k] = []
+        if not isinstance(prof.get(k), list):
+            prof[k] = _norm_list(prof.get(k, []))
+
+    # Legacy: meal_styles -> styles
+    if "meal_styles" in prof and not prof.get("styles"):
+        prof["styles"] = _norm_list(prof.get("meal_styles", []))
+
+    # UI convenience: if oils not set, show all as checked
     if not _norm_list(prof.get("oils_allowed", [])):
-        prof["oils_allowed"] = [o for o in OILS if o]
+        prof["oils_allowed"] = [o.strip().lower() for o in OILS if str(o).strip()]
     else:
         prof["oils_allowed"] = _norm_list(prof.get("oils_allowed", []))
 
-    # Ensure flags exist (default True)
-    prof["eats_meat"] = _sanitize_bool(prof.get("eats_meat", True), True)
-    prof["eats_fish"] = _sanitize_bool(prof.get("eats_fish", True), True)
-    prof["eats_dairy"] = _sanitize_bool(prof.get("eats_dairy", True), True)
-    prof["eats_eggs"] = _sanitize_bool(prof.get("eats_eggs", True), True)
-
+    # spice_level is optional; leave as-is
     return prof
 
 
@@ -407,69 +472,51 @@ def get_member_profile(member_id: int) -> Dict[str, Any]:
     Returns raw member profile (stored overrides) as a dict.
     """
     cfg = config_store.load_config()
-    mem = None
-    for m in list(getattr(cfg.household, "members", []) or []):
-        try:
-            if int(m.id) == int(member_id):
-                mem = m
-                break
-        except Exception:
-            continue
+    mem = _find_member(cfg, member_id)
     if not mem:
         return {}
 
     prof = dict(_profile(mem))
 
-    for k in ("allergies", "hard_excludes", "soft_excludes", "excluded_proteins", "favorite_cuisines", "meal_styles"):
+    # Legacy: meal_styles -> styles
+    if "meal_styles" in prof and "styles" not in prof:
+        prof["styles"] = prof.get("meal_styles", [])
+
+    # normalize expected list keys
+    for k in ("allergies", "hard_excludes", "soft_excludes", "excluded_proteins", "favorite_cuisines", "styles"):
         if k in prof:
             prof[k] = _norm_list(prof.get(k, []))
 
     if "preferred_protein_weights" in prof and not isinstance(prof.get("preferred_protein_weights"), dict):
         prof["preferred_protein_weights"] = {}
 
-    # flags (if present)
-    if "eats_meat" in prof:
-        prof["eats_meat"] = _sanitize_bool(prof.get("eats_meat", True), True)
-    if "eats_fish" in prof:
-        prof["eats_fish"] = _sanitize_bool(prof.get("eats_fish", True), True)
+    if "oils_allowed" in prof:
+        prof["oils_allowed"] = _norm_list(prof.get("oils_allowed", []))
 
     return prof
 
 
 def get_effective_edit_state_for_member(member_id: int) -> Dict[str, Any]:
     """
-    Dict used to pre-fill wizard/preferences UI for a member:
+    Returns a dict used to pre-fill wizard/preferences UI for a member:
     - baseline selections (from household baseline)
     - with member overrides applied for display
 
-    IMPORTANT: This is UI convenience, not filtering logic.
+    IMPORTANT:
+    - This is for UI convenience, not for filtering logic.
     """
     baseline = get_household_baseline_profile()
     member = get_member_profile(member_id)
 
     effective: Dict[str, Any] = {}
 
-    # Flags: member override else baseline
-    effective["eats_meat"] = _sanitize_bool(member.get("eats_meat", baseline.get("eats_meat", True)), True)
-    effective["eats_fish"] = _sanitize_bool(member.get("eats_fish", baseline.get("eats_fish", True)), True)
-
-    # Baseline excluded proteins (hard household baseline)
+    # Proteins: baseline allowed = PROTEINS minus baseline excluded_proteins
     baseline_excl = set(_norm_list(baseline.get("excluded_proteins", [])))
+    allowed_proteins = [p for p in _norm_list(PROTEINS) if p and p not in baseline_excl]
 
-    # Baseline allowed proteins = PROTEINS - baseline excluded
-    allowed_proteins = [p for p in PROTEINS if p and p not in baseline_excl]
-
-    # Member excluded_proteins for UI (unchecked)
+    # Apply member excluded_proteins for UI (unchecked)
     member_excl = set(_norm_list(member.get("excluded_proteins", [])))
-    proteins_selected = [p for p in allowed_proteins if p not in member_excl]
-
-    # Apply member flags for UI only: if member says “no meat/fish”, uncheck those groups
-    if not effective["eats_meat"]:
-        proteins_selected = [p for p in proteins_selected if p not in MEAT_PROTEINS]
-    if not effective["eats_fish"]:
-        proteins_selected = [p for p in proteins_selected if p not in SEAFOOD_PROTEINS]
-
-    effective["proteins_selected"] = proteins_selected
+    effective["proteins_selected"] = [p for p in allowed_proteins if p not in member_excl]
 
     # Protein weights: baseline weights; member may have their own (optional override for their view)
     weights = dict(_norm_dict(baseline.get("preferred_protein_weights", {}) or {}))
@@ -477,7 +524,7 @@ def get_effective_edit_state_for_member(member_id: int) -> Dict[str, Any]:
     weights.update(member_weights)
     effective["preferred_protein_weights"] = weights
 
-    # Oils: baseline for household; member may have their own selection for their view
+    # Oils: member override else baseline UI view
     oils = _norm_list(member.get("oils_allowed", [])) or _norm_list(baseline.get("oils_allowed", []))
     effective["oils_allowed"] = oils
 
@@ -487,81 +534,147 @@ def get_effective_edit_state_for_member(member_id: int) -> Dict[str, Any]:
     effective["favorite_cuisines"] = sorted(cuisines)
 
     # Spice level: member override else baseline
-    effective["spice_level"] = member.get("spice_level", baseline.get("spice_level", "medium"))
+    effective["spice_level"] = (member.get("spice_level") or baseline.get("spice_level") or "medium")
 
-    # Meal styles: baseline + member (additive)
-    styles = set(_norm_list(baseline.get("meal_styles", [])))
-    styles.update(_norm_list(member.get("meal_styles", [])))
-    effective["meal_styles"] = sorted(styles)
+    # Styles: baseline + member (additive for UI)
+    styles = set(_norm_list(baseline.get("styles", [])))
+    styles.update(_norm_list(member.get("styles", [])))
+    effective["styles"] = sorted(styles)
 
-    # Allergies (member-specific list, but household hard exclude will be built from all members)
+    # Allergies (member-specific list, but effective prefs uses all members)
     effective["allergies"] = _norm_list(member.get("allergies", []))
 
-    # Ingredient excludes for UI:
-    effective["household_hard_excludes"] = sorted(set(_norm_list(baseline.get("hard_excludes", []))))
-
-    # member soft excludes: include legacy hard_excludes too (treated as soft for secondary)
+    # Excludes for UI:
+    effective["household_hard_excludes"] = get_household_hard_excludes()
     effective["member_soft_excludes"] = sorted(
         set(_norm_list(member.get("soft_excludes", [])) + _norm_list(member.get("hard_excludes", [])))
     )
 
-    # diet_flags: optional (future)
+    # diet_flags optional
     effective["diet_flags"] = member.get("diet_flags", baseline.get("diet_flags", {}))
 
     return effective
 
 
 # ---------------------------------------------------------------------------
+# UI validation helpers (duplicate / redundancy prevention)
+# ---------------------------------------------------------------------------
+
+def validate_add_exclude(
+    *,
+    member_id: int,
+    value: str,
+    exclude_kind: str,
+) -> Tuple[bool, str]:
+    """
+    Generic validator for UI list add actions.
+
+    exclude_kind:
+      - "allergy"
+      - "hard_exclude"
+      - "soft_exclude"
+
+    Rules:
+      - If adding soft exclude as a SECONDARY and value is already household hard-excluded, block (redundant).
+      - Always block exact duplicates inside the target list.
+      - Normalize tokens (lower/strip).
+    """
+    cfg = config_store.load_config()
+    mem = _find_member(cfg, member_id)
+    if not mem:
+        return False, "Member not found."
+
+    token = _norm_token(value)
+    if not token:
+        return False, "Enter a non-empty value."
+
+    role = getattr(mem, "role", config_store.ROLE_SECONDARY)
+
+    prof = _profile(mem)
+    allergies = set(_norm_list(prof.get("allergies", [])))
+    hard_ex = set(_norm_list(prof.get("hard_excludes", [])))
+    soft_ex = set(_norm_list(prof.get("soft_excludes", [])))
+
+    eff = compute_effective_preferences()
+    household_hard = set(get_household_hard_excludes(eff))
+
+    kind = (exclude_kind or "").strip().lower()
+
+    if kind == "allergy":
+        if token in allergies:
+            return False, "Already in allergies."
+        return True, ""
+
+    if kind == "hard_exclude":
+        # For master, prevent redundancy with allergies (still fine, but noisy)
+        if token in allergies:
+            return False, "Already hard-excluded via an allergy."
+        if token in hard_ex:
+            return False, "Already in hard excludes."
+        # If it's already household hard (from master hard or allergies), it is redundant
+        if token in household_hard:
+            return False, "Already hard-excluded at the household level."
+        return True, ""
+
+    if kind == "soft_exclude":
+        # For secondaries: can't add if already household hard-excluded
+        if role != config_store.ROLE_MASTER and token in household_hard:
+            return False, "That ingredient is already hard-excluded for the household (master/allergy)."
+
+        if token in soft_ex or token in hard_ex:
+            return False, "Already in your excludes."
+
+        # Optional: prevent redundancy if master already soft-excludes it (still allowed, but could be noisy)
+        # We'll allow it (since secondary dislike can be useful for '*' attribution).
+        return True, ""
+
+    return False, "Unknown exclude type."
+
+
+# ---------------------------------------------------------------------------
 # Reset helper (for "Reset to household baseline" button)
 # ---------------------------------------------------------------------------
 
-def reset_secondary_member_to_household_baseline(member_id: int) -> bool:
+def reset_secondary_member_to_household_baseline(member_id: int) -> None:
     """
-    Clears SECONDARY member overrides back to baseline, preserving allergies.
+    Clears SECONDARY member overrides back to baseline, while preserving allergies.
 
-    Delegates to config_store.reset_secondary_member_to_household_baseline if present.
-    Returns True if reset occurred.
+    Meant to back the UI button:
+      "Reset to household baseline"
     """
-    fn = getattr(config_store, "reset_secondary_member_to_household_baseline", None)
-    if callable(fn):
-        return bool(fn(member_id))
-
-    # Fallback (older config_store)
     cfg = config_store.load_config()
-    master = config_store.get_master_member()
+    master = _get_master_member()
 
+    # Don't allow resetting the master via this function
     try:
         if int(member_id) == int(master.id):
-            return False
+            return
     except Exception:
-        return False
+        pass
 
-    mem = None
-    for m in list(getattr(cfg.household, "members", []) or []):
-        try:
-            if int(m.id) == int(member_id):
-                mem = m
-                break
-        except Exception:
-            continue
+    mem = _find_member(cfg, member_id)
     if not mem:
-        return False
-
-    if getattr(mem, "role", "secondary") != getattr(config_store, "ROLE_SECONDARY", "secondary"):
-        return False
+        return
 
     prof = _profile(mem)
     allergies = _norm_list(prof.get("allergies", []))
 
+    # Remove override keys
     for k in list(_SECONDARY_OVERRIDE_KEYS):
         prof.pop(k, None)
 
+    # Restore allergies
     if allergies:
         prof["allergies"] = allergies
+    else:
+        prof.pop("allergies", None)
 
-    mem.profile = prof
+    try:
+        mem.profile = prof
+    except Exception:
+        pass
+
     config_store.save_config(cfg)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -570,16 +683,15 @@ def reset_secondary_member_to_household_baseline(member_id: int) -> bool:
 
 def protein_groups() -> Dict[str, List[str]]:
     """
-    For wizard UI grouping, strictly matching your canonical protein list.
+    For wizard UI grouping.
     """
-    canon = set([p.strip().lower() for p in PROTEINS if str(p).strip()])
-
-    meat = [p for p in sorted(MEAT_PROTEINS) if p in canon]
-    seafood = [p for p in sorted(SEAFOOD_PROTEINS) if p in canon]
-    plant = [p for p in sorted(PLANT_PROTEINS) if p in canon]
+    canon = set([_norm_token(p) for p in PROTEINS if _norm_token(p)])
+    meat = [p for p in MEAT_PROTEINS if _norm_token(p) in canon]
+    seafood = [p for p in SEAFOOD_PROTEINS if _norm_token(p) in canon]
+    plant = [p for p in PLANT_PROTEINS if _norm_token(p) in canon]
 
     return {
-        "meat": meat,
-        "seafood": seafood,
-        "plant": plant,
+        "meat": sorted({p for p in meat}),
+        "seafood": sorted({p for p in seafood}),
+        "plant": sorted({p for p in plant}),
     }
