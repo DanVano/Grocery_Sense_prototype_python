@@ -1,7 +1,7 @@
 """
 Grocery_Sense.ui.tk_main
 
-Tkinter prototype UI for Grocery Sense (Dark Mode ONLY).
+Tkinter prototype UI for Grocery Sense.
 
 Main menu:
 - Initialize DB
@@ -16,355 +16,42 @@ Main menu:
 - Item Manager
 - Flyer Import (Manual)
 - Seed Demo Data
-
-This file also contains:
-- Dark theme configuration (ttk + tk palette)
-- Styled log output area (same look as your previous app)
-- Thread-safe logger (root.after)
-- Progressbar styling + helper utilities
 """
 
 from __future__ import annotations
 
-import re
-import threading
 import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
-from typing import Callable, Optional
 
 from Grocery_Sense.data.schema import initialize_database
 
 from Grocery_Sense.services.shopping_list_service import ShoppingListService
 from Grocery_Sense.services.meal_suggestion_service import MealSuggestionService
-from Grocery_Sense.services.weekly_planner_service import WeeklyPlannerService, summarize_weekly_plan
+
+from Grocery_Sense.services.weekly_planner_service import (
+    WeeklyPlannerService,
+    summarize_weekly_plan,
+)
 from Grocery_Sense.services.planning_service import PlanningService
 from Grocery_Sense.services.demo_seed_service import seed_demo_data
 
 from Grocery_Sense.ui.flyer_import_window import open_flyer_import_window
 from Grocery_Sense.ui.item_manager_window import open_item_manager_window
+from Grocery_Sense.ui.preferences_window import open_preferences_window
+from Grocery_Sense.ui.price_history_window import open_price_history_window
 from Grocery_Sense.ui.receipt_import_window import open_receipt_import_window
 from Grocery_Sense.ui.receipt_browser_window import open_receipt_browser_window
 from Grocery_Sense.ui.store_plan_window import open_store_plan_window
-from Grocery_Sense.ui.price_history_window import open_price_history_window
 
 
-# =============================================================================
-# Dark Theme + UI Helpers (embedded)
-# =============================================================================
-
-# Detect your final summary lines so labels can be bolded with colons.
-# Example: "[INFO] Imported 12 | Duplicates 3 | Errors 0"
-_SUMMARY_RE = re.compile(r"^\[INFO\]\s*.+\d(?:\s\|\s.+\d)+$")
-
-# Palette (matches your snippet)
-_BG = "#242424"
-_PANEL_BG = "#242424"
-_FG = "#F8F8F8"
-_MUTED_FG = "#AAAAAA"
-
-_BTN_BG = "#333333"
-_BTN_HOVER = "#555555"
-
-_ENTRY_BG = "#2B2B2B"
-_BORDER = "#333333"
-
-_TROUGH = "#444444"
-_PROG = "#D6D6D6"
-
-
-def apply_dark_theme(root: tk.Misc) -> None:
-    """
-    Dark mode is the ONLY mode.
-    Apply to ttk + base tk palette.
-    """
-    # Classic tk palette (affects tk.Frame, tk.Label, tk.Listbox, tk.Text, etc.)
-    try:
-        root.tk_setPalette(
-            background=_BG,
-            foreground=_FG,
-            activeBackground=_BTN_HOVER,
-            activeForeground=_FG,
-            highlightColor="#444444",
-        )
-    except Exception:
-        pass
-
-    # ttk styling
-    style = ttk.Style(root)
-    try:
-        style.theme_use("clam")
-    except Exception:
-        pass
-
-    try:
-        root.option_add("*Font", ("Segoe UI", 10))
-    except Exception:
-        pass
-
-    # General containers
-    style.configure(".", background=_BG, foreground=_FG)
-    style.configure("TFrame", background=_BG)
-    style.configure("TLabel", background=_BG, foreground=_FG)
-    style.configure("TLabelframe", background=_BG, foreground=_FG, bordercolor=_BORDER)
-    style.configure("TLabelframe.Label", background=_BG, foreground=_FG)
-
-    # Buttons
-    style.configure(
-        "TButton",
-        background=_BTN_BG,
-        foreground=_FG,
-        bordercolor=_BORDER,
-        focusthickness=2,
-        focuscolor=_BORDER,
-        padding=(10, 6),
-    )
-    style.map(
-        "TButton",
-        background=[("active", _BTN_HOVER), ("pressed", "#2A2A2A"), ("disabled", "#2A2A2A")],
-        foreground=[("disabled", "#888888")],
-    )
-
-    # Checkbutton / Radiobutton
-    style.configure("TCheckbutton", background=_BG, foreground=_FG)
-    style.map("TCheckbutton", foreground=[("disabled", "#888888")])
-
-    style.configure("TRadiobutton", background=_BG, foreground=_FG)
-    style.map("TRadiobutton", foreground=[("disabled", "#888888")])
-
-    # Entry / Combobox
-    style.configure(
-        "TEntry",
-        fieldbackground=_ENTRY_BG,
-        background=_ENTRY_BG,
-        foreground=_FG,
-        insertcolor=_FG,
-        bordercolor=_BORDER,
-    )
-    style.configure(
-        "TCombobox",
-        fieldbackground=_ENTRY_BG,
-        background=_ENTRY_BG,
-        foreground=_FG,
-        arrowcolor=_FG,
-        bordercolor=_BORDER,
-    )
-    style.map(
-        "TCombobox",
-        fieldbackground=[("readonly", _ENTRY_BG), ("disabled", _ENTRY_BG)],
-        foreground=[("readonly", _FG), ("disabled", "#888888")],
-        background=[("active", _BTN_HOVER)],
-    )
-
-    # Notebook
-    style.configure("TNotebook", background=_BG, bordercolor=_BORDER)
-    style.configure("TNotebook.Tab", background=_BTN_BG, foreground=_FG, padding=(10, 6))
-    style.map("TNotebook.Tab", background=[("selected", "#2F2F2F"), ("active", _BTN_HOVER)])
-
-    # Treeview
-    style.configure(
-        "Treeview",
-        background=_ENTRY_BG,
-        fieldbackground=_ENTRY_BG,
-        foreground=_FG,
-        rowheight=24,
-        bordercolor=_BORDER,
-    )
-    style.configure(
-        "Treeview.Heading",
-        background=_BTN_BG,
-        foreground=_FG,
-        bordercolor=_BORDER,
-        padding=(8, 6),
-    )
-    style.map(
-        "Treeview",
-        background=[("selected", "#3A3A3A")],
-        foreground=[("selected", _FG)],
-    )
-    style.map("Treeview.Heading", background=[("active", _BTN_HOVER)])
-
-    # Scrollbar
-    style.configure("TScrollbar", background=_BG, troughcolor=_BG, bordercolor=_BORDER, arrowcolor=_FG)
-
-    # Progressbar (your style)
-    style.configure(
-        "Custom.Horizontal.TProgressbar",
-        troughcolor=_TROUGH,
-        background=_PROG,
-        bordercolor="#555555",
-        thickness=18,
-    )
-    style.configure(
-        "Horizontal.TProgressbar",
-        troughcolor=_TROUGH,
-        background=_PROG,
-        bordercolor="#555555",
-        thickness=18,
-    )
-
-    try:
-        root.configure(bg=_BG)
-    except Exception:
-        pass
-
-
-def style_text_widget(text: tk.Text) -> None:
-    """Match your previous Text styling."""
-    try:
-        text.configure(
-            bg=_PANEL_BG,
-            fg=_FG,
-            insertbackground=_FG,
-            highlightbackground=_BORDER,
-            highlightcolor="#444444",
-            padx=16,
-            pady=10,
-            font=("Segoe UI", 12),
-            wrap="word",
-        )
-    except Exception:
-        pass
-
-    try:
-        text.tag_configure("bold", font=("Segoe UI", 12, "bold"))
-        text.tag_configure("dotted", foreground=_MUTED_FG, spacing1=7, spacing3=2)
-        text.tag_configure("logtitle", font=("Segoe UI", 12, "bold"), spacing1=2)
-    except Exception:
-        pass
-
-
-def style_listbox(lb: tk.Listbox) -> None:
-    """Dark style for listboxes."""
-    try:
-        lb.configure(
-            bg=_PANEL_BG,
-            fg=_FG,
-            selectbackground="#3A3A3A",
-            selectforeground=_FG,
-            highlightbackground=_BORDER,
-            highlightcolor="#444444",
-            activestyle="none",
-        )
-    except Exception:
-        pass
-
-
-def build_output_area(parent: tk.Misc, *, height: int = 12) -> tuple[tk.Text, tk.Frame]:
-    """Create the output Text area (exact look/feel from your snippet)."""
-    out_frame = tk.Frame(parent, bg=_BG)
-
-    text_output = tk.Text(
-        out_frame,
-        height=height,
-        width=110,
-        bg=_PANEL_BG,
-        fg=_FG,
-        insertbackground=_FG,
-        highlightbackground=_BORDER,
-        highlightcolor="#444444",
-        padx=16,
-        pady=10,
-        font=("Segoe UI", 12),
-        wrap="word",
-    )
-    text_output.pack(side="left", fill="both", expand=True)
-
-    y_scroll = tk.Scrollbar(out_frame, orient="vertical", relief="sunken", command=text_output.yview)
-    y_scroll.pack(side="right", fill="y")
-    text_output.configure(yscrollcommand=y_scroll.set)
-
-    style_text_widget(text_output)
-    text_output.configure(state="disabled")
-    return text_output, out_frame
-
-
-def make_threadsafe_logger(root: tk.Misc, text_output: tk.Text) -> Callable[[str], None]:
-    """Thread-safe logger(msg) preserving your summary-line bolding behavior."""
-    def log(msg: str) -> None:
-        def _append() -> None:
-            try:
-                text_output.configure(state="normal")
-
-                leading_newlines = len(msg) - len(msg.lstrip("\n"))
-                if leading_newlines:
-                    text_output.insert(tk.END, "\n" * leading_newlines)
-
-                stripped = msg.lstrip()
-
-                if _SUMMARY_RE.match(stripped):
-                    text_output.insert(tk.END, "[INFO] ", "bold")
-                    body = stripped.split("] ", 1)[1] if "] " in stripped else stripped[7:]
-                    parts = [p.strip() for p in body.split("|")]
-                    for i, part in enumerate(parts):
-                        label, value = (part.rsplit(" ", 1) if " " in part else (part, ""))
-                        text_output.insert(tk.END, f"{label}: ", "bold")
-                        text_output.insert(tk.END, value)
-                        if i < len(parts) - 1:
-                            text_output.insert(tk.END, " | ")
-                    text_output.insert(tk.END, "\n")
-                else:
-                    text_output.insert(tk.END, msg + "\n")
-
-                text_output.see(tk.END)
-                text_output.configure(state="disabled")
-            except Exception:
-                pass
-
-        try:
-            root.after(0, _append)
-        except Exception:
-            pass
-
-    return log
-
-
-def build_progressbar(parent: tk.Misc, *, length: int = 400, determinate: bool = True) -> ttk.Progressbar:
-    """Create your custom-styled progressbar."""
-    mode = "determinate" if determinate else "indeterminate"
-    return ttk.Progressbar(
-        parent,
-        orient="horizontal",
-        length=length,
-        mode=mode,
-        style="Custom.Horizontal.TProgressbar",
-    )
-
-
-def center_window(win: tk.Misc) -> None:
-    """Center the window on screen."""
-    try:
-        win.update_idletasks()
-        w = win.winfo_width()
-        h = win.winfo_height()
-        sw = win.winfo_screenwidth()
-        sh = win.winfo_screenheight()
-        x = (sw // 2) - (w // 2)
-        y = (sh // 2) - (h // 2)
-        win.geometry(f"{w}x{h}+{x}+{y}")
-    except Exception:
-        pass
-
-
-def run_in_thread(fn, *args, **kwargs) -> None:
-    """Start a daemon thread for long-running tasks (keeps UI responsive)."""
-    threading.Thread(target=lambda: fn(*args, **kwargs), daemon=True).start()
-
-
-# =============================================================================
-# App
-# =============================================================================
 
 class GrocerySenseApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Grocery Sense - Prototype")
         self.geometry("980x700")
-        self.configure(bg=_BG)
-
-        # Dark mode is always on
-        apply_dark_theme(self)
 
         initialize_database()
 
@@ -374,32 +61,143 @@ class GrocerySenseApp(tk.Tk):
             meal_suggestion_service=self.meal_suggestion_service,
             shopping_list_service=self.shopping_list_service,
         )
-
-        # Your PlanningService currently expects no args (based on your runtime error earlier)
         self.planning_service = PlanningService()
 
-        self._log_box: Optional[tk.Text] = None
-        self._log_fn: Callable[[str], None] = lambda _msg: None
 
         self._build_main_menu()
         self._build_log_panel()
         self._log("App started.")
 
     # ------------------------------------------------------------------
-    # Logging / safety
+    # Base UI helpers
     # ------------------------------------------------------------------
 
+    def _build_main_menu(self) -> None:
+        frame = ttk.Frame(self)
+        frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(frame, text="Grocery Sense - Main Menu", font=("Segoe UI", 14, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10)
+        )
+
+        row = 1
+
+        ttk.Button(
+            frame,
+            text="1) Initialize / Verify Database",
+            command=self._safe_call(self._handle_init_db),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="2) Shopping List",
+            command=self._safe_call(self._open_shopping_list_window),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="3) Meal Suggestions",
+            command=self._safe_call(self._open_meal_suggestions_window),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="4) Build Weekly Plan",
+            command=self._safe_call(self._open_weekly_plan_window),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="5) Receipt Import (Azure)",
+            command=self._safe_call(lambda: open_receipt_import_window(self, log=self._log)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="6) Receipt Browser + Delete/Undo",
+            command=self._safe_call(lambda: open_receipt_browser_window(self, log=self._log)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="7) Stores Management",
+            command=self._safe_call(self._open_stores_management_window),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="8) Store Plan (with savings)",
+            command=self._safe_call(lambda: open_store_plan_window(self, log=self._log)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="9) Price History Viewer",
+            command=self._safe_call(lambda: open_price_history_window(self)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="10) Item Manager",
+            command=self._safe_call(lambda: open_item_manager_window(self, log=self._log)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+	
+	ttk.Button(
+    	    frame,
+    	    text="11) Preferences",
+    	    command=self._safe_call(lambda: open_preferences_window(self, log=self._log)),
+    	    width=35,
+	).grid(row=row, column=0, sticky="w", pady=2)
+	row += 1
+
+
+        ttk.Button(
+            frame,
+            text="12) Flyer Import (Manual)",
+            command=self._safe_call(lambda: open_flyer_import_window(self, log=self._log)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="13) Seed Demo Data",
+            command=self._safe_call(self._seed_demo_data),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
     def _build_log_panel(self) -> None:
-        text, frame = build_output_area(self, height=12)
-        frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=False, padx=16, pady=6)
-        self._log_box = text
-        self._log_fn = make_threadsafe_logger(self, text)
+        self.log_box = ScrolledText(self, state=tk.NORMAL, height=12)
+        self.log_box.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=False, padx=10, pady=10)
         self._log("Log initialized.")
 
     def _log(self, message: str) -> None:
         try:
-            self._log_fn(str(message))
+            self.log_box.insert(tk.END, message + "\n")
+            self.log_box.see(tk.END)
         except Exception:
+            # If log box isn't built yet
             pass
 
     def _log_exception(self, prefix: str) -> None:
@@ -416,135 +214,32 @@ class GrocerySenseApp(tk.Tk):
         return wrapper
 
     # ------------------------------------------------------------------
-    # Main Menu
-    # ------------------------------------------------------------------
-
-    def _build_main_menu(self) -> None:
-        frame = ttk.Frame(self)
-        frame.pack(side=tk.TOP, fill=tk.X, padx=16, pady=14)
-
-        ttk.Label(frame, text="Grocery Sense - Main Menu", font=("Segoe UI", 14, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10)
-        )
-
-        row = 1
-
-        ttk.Button(
-            frame,
-            text="1) Initialize / Verify Database",
-            command=self._safe_call(self._handle_init_db),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="2) Shopping List",
-            command=self._safe_call(self._open_shopping_list_window),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="3) Meal Suggestions",
-            command=self._safe_call(self._open_meal_suggestions_window),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="4) Build Weekly Plan",
-            command=self._safe_call(self._open_weekly_plan_window),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="5) Receipt Import (Azure)",
-            command=self._safe_call(lambda: open_receipt_import_window(self, log=self._log)),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="6) Receipt Browser + Delete/Undo",
-            command=self._safe_call(lambda: open_receipt_browser_window(self, log=self._log)),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="7) Stores Management",
-            command=self._safe_call(self._open_stores_management_window),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="8) Store Plan (with savings)",
-            command=self._safe_call(lambda: open_store_plan_window(self, log=self._log)),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="9) Price History Viewer",
-            command=self._safe_call(lambda: open_price_history_window(self)),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="10) Item Manager",
-            command=self._safe_call(lambda: open_item_manager_window(self, log=self._log)),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="11) Flyer Import (Manual)",
-            command=self._safe_call(lambda: open_flyer_import_window(self, log=self._log)),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-        ttk.Button(
-            frame,
-            text="12) Seed Demo Data",
-            command=self._safe_call(self._seed_demo_data),
-            width=35,
-        ).grid(row=row, column=0, sticky="w", pady=3)
-        row += 1
-
-    # ------------------------------------------------------------------
-    # Handlers
+    # Handlers / windows
     # ------------------------------------------------------------------
 
     def _handle_init_db(self) -> None:
         initialize_database()
-        self._log("[INFO] Database initialized 1 | Verified 1 | Errors 0")
+        self._log("Database schema initialized / verified.")
 
     def _open_stores_management_window(self) -> None:
+        """
+        You referenced this in the main menu.
+        If you already have a stores management window module, import and call it here.
+
+        For now: safe placeholder so the UI runs cleanly.
+        """
         messagebox.showinfo(
             "Stores Management",
-            "Stores Management screen is not wired here yet.\n\n"
-            "If you have a stores window module, tell me its import path\n"
-            "and I’ll hook it into this menu.",
+            "Stores Management screen is not wired in this tk_main.py yet.\n\n"
+            "If you have it already, tell me the module path (e.g. Grocery_Sense.ui.stores_management_window)\n"
+            "and I’ll hook it up.",
         )
 
     def _seed_demo_data(self) -> None:
         result = seed_demo_data(reset_first=True, n_price_points=200, days_back=90, seed=42)
         self._log(
-            f"[INFO] Demo seed complete stores {result['stores']} | items {result['items']} | prices {result['price_points']}"
+            f"Demo seed complete: stores={result['stores']}, "
+            f"items={result['items']}, prices={result['price_points']}"
         )
 
     # ------------------------------------------------------------------
@@ -555,15 +250,15 @@ class GrocerySenseApp(tk.Tk):
         win = tk.Toplevel(self)
         win.title("Shopping List")
         win.geometry("820x560")
-        win.configure(bg=_BG)
 
         root = ttk.Frame(win)
-        root.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        root.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         ttk.Label(root, text="Shopping List", font=("Segoe UI", 12, "bold")).grid(
             row=0, column=0, sticky="w"
         )
 
+        # --- Add item panel
         add_frame = ttk.LabelFrame(root, text="Add Item")
         add_frame.grid(row=1, column=0, sticky="ew", pady=(10, 10))
         add_frame.columnconfigure(1, weight=1)
@@ -583,14 +278,13 @@ class GrocerySenseApp(tk.Tk):
         unit_entry = ttk.Entry(add_frame, textvariable=unit_var, width=10)
         unit_entry.grid(row=0, column=5, sticky="w", padx=8, pady=6)
 
+        # --- List panel
         list_frame = ttk.Frame(root)
         list_frame.grid(row=2, column=0, sticky="nsew")
         root.rowconfigure(2, weight=1)
         root.columnconfigure(0, weight=1)
 
         listbox = tk.Listbox(list_frame, height=14)
-        style_listbox(listbox)
-
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
         listbox.configure(yscrollcommand=scrollbar.set)
 
@@ -656,7 +350,7 @@ class GrocerySenseApp(tk.Tk):
                 notes=None,
                 added_by="tk_ui",
                 item_id=None,
-                auto_map=True,
+                auto_map=True,  # mapping
             )
             self._log(f"Added: {name} ({quantity or ''} {unit})")
             name_var.set("")
@@ -702,39 +396,22 @@ class GrocerySenseApp(tk.Tk):
     # Meal Suggestions
     # ------------------------------------------------------------------
 
-    def _format_meal_suggestion(self, s) -> str:
-        recipe = getattr(s, "recipe", None) or {}
-        name = recipe.get("name") or recipe.get("title") or "Recipe"
-        total_score = getattr(s, "total_score", None)
-        reasons = getattr(s, "reasons", None) or []
-        lines = [f"{name}"]
-        if total_score is not None:
-            lines.append(f"\nScore: {total_score}")
-        if reasons:
-            lines.append("\nReasons:")
-            for r in reasons:
-                lines.append(f" - {r}")
-        return "\n".join(lines) + "\n"
-
     def _open_meal_suggestions_window(self) -> None:
         win = tk.Toplevel(self)
         win.title("Meal Suggestions")
         win.geometry("860x540")
-        win.configure(bg=_BG)
 
         top_frame = ttk.Frame(win)
-        top_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=12)
+        top_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         ttk.Label(top_frame, text="Meal Suggestions", font=("Segoe UI", 11, "bold")).grid(
             row=0, column=0, sticky="w"
         )
 
         listbox = tk.Listbox(top_frame, width=35)
-        style_listbox(listbox)
         listbox.grid(row=1, column=0, sticky="nsw", pady=10)
 
         details = ScrolledText(top_frame, state=tk.NORMAL)
-        style_text_widget(details)
         details.grid(row=1, column=1, sticky="nsew", padx=(10, 0), pady=10)
 
         top_frame.grid_columnconfigure(1, weight=1)
@@ -743,8 +420,7 @@ class GrocerySenseApp(tk.Tk):
         suggestions = self.meal_suggestion_service.suggest_meals_for_week(max_recipes=10)
 
         for s in suggestions:
-            recipe = getattr(s, "recipe", None) or {}
-            name = recipe.get("name") or recipe.get("title") or "Recipe"
+            name = s.recipe.get("name") or s.recipe.get("title") or "Recipe"
             listbox.insert(tk.END, name)
 
         def on_select(_evt):
@@ -753,7 +429,7 @@ class GrocerySenseApp(tk.Tk):
                 return
             s = suggestions[int(idxs[0])]
             details.delete("1.0", tk.END)
-            details.insert(tk.END, self._format_meal_suggestion(s))
+            details.insert(tk.END, explain_suggested_meal(s))
 
         listbox.bind("<<ListboxSelect>>", on_select)
 
@@ -765,15 +441,13 @@ class GrocerySenseApp(tk.Tk):
         win = tk.Toplevel(self)
         win.title("Weekly Plan")
         win.geometry("860x580")
-        win.configure(bg=_BG)
 
         ttk.Label(win, text="Weekly Plan", font=("Segoe UI", 11, "bold")).pack(
-            side=tk.TOP, anchor="w", padx=12, pady=12
+            side=tk.TOP, anchor="w", padx=10, pady=10
         )
 
         summary_box = ScrolledText(win, state=tk.NORMAL)
-        style_text_widget(summary_box)
-        summary_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+        summary_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         def build_plan():
             summary_box.delete("1.0", tk.END)
@@ -798,10 +472,91 @@ class GrocerySenseApp(tk.Tk):
                 )
 
         ttk.Button(win, text="Build Weekly Plan", command=self._safe_call(build_plan)).pack(
-            side=tk.BOTTOM, pady=10
+            side=tk.BOTTOM, pady=8
         )
 
         build_plan()
+
+    # ------------------------------------------------------------------
+    # Store Plan (simple renderer)
+    # ------------------------------------------------------------------
+
+    def _open_store_plan_window(self) -> None:
+        win = tk.Toplevel(self)
+        win.title("Store Plan")
+        win.geometry("900x600")
+
+        root = ttk.Frame(win)
+        root.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        header = ttk.Frame(root)
+        header.pack(fill=tk.X)
+
+        ttk.Label(header, text="Store Plan", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
+
+        ttk.Label(header, text="Max stores:").pack(side=tk.LEFT, padx=(20, 6))
+        max_var = tk.StringVar(value="3")
+        max_entry = ttk.Entry(header, textvariable=max_var, width=6)
+        max_entry.pack(side=tk.LEFT)
+
+        output = ScrolledText(root, state=tk.NORMAL)
+        output.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        def render_plan() -> None:
+            output.delete("1.0", tk.END)
+
+            try:
+                max_stores = int((max_var.get() or "3").strip())
+                if max_stores < 1:
+                    max_stores = 1
+            except ValueError:
+                max_stores = 3
+
+            plan = self.planning_service.build_plan_for_active_list(max_stores=max_stores)
+
+            summary = str(plan.get("summary") or "")
+            output.insert(tk.END, summary + "\n\n")
+
+            stores_struct = plan.get("stores") or {}
+            if not stores_struct:
+                output.insert(tk.END, "(No stores selected)\n")
+            else:
+                store_rows = []
+                for sid, payload in stores_struct.items():
+                    items = payload.get("items") or []
+                    store_rows.append((sid, payload, len(items)))
+                store_rows.sort(key=lambda x: x[2], reverse=True)
+
+                for _sid, payload, _count in store_rows:
+                    st = payload.get("store")
+                    items = payload.get("items") or []
+                    if not st:
+                        continue
+
+                    fav = " ★" if getattr(st, "is_favorite", False) else ""
+                    pri = getattr(st, "priority", 0) or 0
+                    output.insert(tk.END, f"{st.name}{fav} (priority={pri})\n")
+                    for it in items:
+                        qty = "" if it.quantity is None else str(it.quantity)
+                        unit = "" if it.unit is None else str(it.unit)
+                        mapped = "" if it.item_id is None else f" [item_id={it.item_id}]"
+                        output.insert(tk.END, f"  - {it.display_name} {qty} {unit}{mapped}\n")
+                    output.insert(tk.END, "\n")
+
+            unassigned = plan.get("unassigned") or []
+            if unassigned:
+                output.insert(tk.END, "Unassigned:\n")
+                for it in unassigned:
+                    qty = "" if it.quantity is None else str(it.quantity)
+                    unit = "" if it.unit is None else str(it.unit)
+                    mapped = "" if it.item_id is None else f" [item_id={it.item_id}]"
+                    output.insert(tk.END, f"  - {it.display_name} {qty} {unit}{mapped}\n")
+                output.insert(tk.END, "\n")
+
+        ttk.Button(header, text="Refresh", command=self._safe_call(render_plan)).pack(side=tk.RIGHT)
+
+        render_plan()
+
 
 def main() -> None:
     app = GrocerySenseApp()
