@@ -390,27 +390,36 @@ class BasketOptimizerService:
             unit_price, unit = flyer
             return PricePick(store_id=store_id, store_name=store_name, unit_price=unit_price, unit=unit, source="flyer")
 
-        # 2) Most recent store-specific history
+                # 2) Most recent store-specific history
         pr = prices_repo.get_most_recent_price(item_id=item_id, store_id=store_id)
-        if pr and pr.unit_price is not None:
+        if pr and getattr(pr, "unit_price", None) is not None:
             return PricePick(
                 store_id=store_id,
                 store_name=store_name,
                 unit_price=float(pr.unit_price),
-                unit=str(pr.unit or "each").strip().lower(),
+                unit=str(getattr(pr, "unit", None) or "each").strip().lower(),
                 source="history_store",
             )
 
-        # 3) Most recent any store
+        # 3) Most recent any-store history (global estimate fallback)
         pr2 = prices_repo.get_most_recent_price(item_id=item_id, store_id=None)
-        if pr2 and pr2.unit_price is not None:
+        if pr2 and getattr(pr2, "unit_price", None) is not None:
             return PricePick(
                 store_id=store_id,
                 store_name=store_name,
                 unit_price=float(pr2.unit_price),
-                unit=str(pr2.unit or "each").strip().lower(),
+                unit=str(getattr(pr2, "unit", None) or "each").strip().lower(),
                 source="history_any",
             )
+
+        # 4) Unknown
+        return PricePick(
+            store_id=store_id,
+            store_name=store_name,
+            unit_price=None,
+            unit="each",
+            source="unknown",
+        )
 
         return PricePick(store_id=store_id, store_name=store_name, unit_price=None, unit="each", source="unknown")
 

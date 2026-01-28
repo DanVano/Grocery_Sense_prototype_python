@@ -1,392 +1,276 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import date
+from typing import Any, Dict, List, Optional
 
-from Grocery_Sense.data.connection import get_connection
+from Grocery_Sense.data.repositories import prices_repo
 
-
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _percent_drop(avg_price: float, observed: float) -> float:
-    if avg_price <= 0:
-        return 0.0
-    return ((avg_price - observed) / avg_price) * 100.0
+# Preferences are optional. If unavailable (during early prototyping), alerts still work.
+try:
+    from Grocery_Sense.services import preferences_service
+except Exception:  # pragma: no cover
+    preferences_service = None
 
 
 @dataclass(frozen=True)
-class AlertCreateResult:
-    created_count: int
-    skipped_count: int
+class PriceDropAlert:
+    # Identity
+    alert_type: str  # "DROP_BELOW_USUAL" | "STOCK_UP" | "BOTH"
+    item_id: int
+    item_name: str
+    store_id: int
+    store_name: str
+
+    # Current quote (from active flyer deal)
+    current_unit_price: float
+    unit: str
+    valid_to: Optional[str] = None
+
+    # Usual price (receipt-first)
+    usual_unit_price: Optional[float] = None
+    usual_source: str = "unknown"  # "receipt" | "estimated" | "unknown"
+    receipt_samples: int = 0
+
+    # 6-month stats
+    low_6mo_store: Optional[float] = None
+    low_6mo_global: Optional[float] = None
+    month_low_store: Optional[float] = None
+
+    # Derived deltas
+    pct_below_usual: Optional[float] = None          # e.g. 0.25 = 25% below usual
+    pct_above_low_6mo: Optional[float] = None        # e.g. 0.03 = 3% above 6mo low (near-low)
+    pct_above_month_low: Optional[float] = None
+
+    # Staple learning
+    staple_purchases_90d: int = 0
+    is_staple: bool = False
+
+    # Preference annotation (soft excludes)
+    soft_excluded_by: Optional[List[str]] = None
+    soft_exclude_hit: Optional[str] = None
+
+    # UI helpers
+    warnings: Optional[List[str]] = None
 
 
 class PriceDropAlertService:
     """
-    Creates + lists "price drop" alerts.
-
-    Rules (v1):
-      - Only items where items.is_tracked = 1
-      - Compare observed receipt unit_price to avg over last N days (default 45)
-      - Prefer same-store average if enough samples; otherwise fallback to overall average
-      - Require min_samples (default 3)
-      - Trigger if percent_drop >= threshold_percent (default 20%)
+    Milestone 2 engine:
+      - "Usual price" learned from receipts (store-specific).
+      - Falls back to other sources if receipt history is sparse.
+      - Generates alerts for active flyer deals only (valid date).
+      - "Stock-up" when near 6-month low AND the item is a staple.
+      - Preference aware (optional): blocks hard-excludes, stars soft-excludes.
     """
 
-    def ensure_tables(self) -> None:
-        with get_connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS price_drop_alerts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'open',
+    # Thresholds (tune later)
+    DEFAULT_DROP_THRESHOLD = 0.20          # 20% below usual
+    DEFAULT_NEAR_LOW_MARGIN = 0.05         # within 5% of 6mo low
+    DEFAULT_NEAR_MONTH_LOW_MARGIN = 0.02   # within 2% of month low
 
-                    receipt_id INTEGER,
-                    item_id INTEGER NOT NULL,
-                    store_id INTEGER,
+    DEFAULT_USUAL_WINDOW_DAYS = 180
+    DEFAULT_STAPLE_WINDOW_DAYS = 90
+    DEFAULT_STAPLE_MIN_PURCHASES = 4
 
-                    observed_date TEXT,
-                    observed_unit_price REAL NOT NULL,
+    def __init__(self) -> None:
+        pass
 
-                    avg_window_days INTEGER NOT NULL,
-                    avg_price REAL,
-                    sample_count INTEGER,
-
-                    percent_drop REAL,
-                    threshold_percent REAL,
-                    basis TEXT,           -- 'store' | 'overall'
-                    note TEXT,
-
-                    UNIQUE(receipt_id, item_id, store_id) ON CONFLICT IGNORE
-                );
-                """
-            )
-            conn.commit()
-
-    # -------------------- Public API --------------------
-
-    def detect_for_receipt(
+    def get_alerts(
         self,
-        receipt_id: int,
         *,
-        threshold_percent: float = 20.0,
-        window_days: int = 45,
-        min_samples: int = 3,
-    ) -> AlertCreateResult:
+        limit: int = 250,
+        as_of: Optional[date] = None,
+        drop_threshold: float = DEFAULT_DROP_THRESHOLD,
+        near_low_margin: float = DEFAULT_NEAR_LOW_MARGIN,
+        near_month_low_margin: float = DEFAULT_NEAR_MONTH_LOW_MARGIN,
+        usual_window_days: int = DEFAULT_USUAL_WINDOW_DAYS,
+        staple_window_days: int = DEFAULT_STAPLE_WINDOW_DAYS,
+        staple_min_purchases: int = DEFAULT_STAPLE_MIN_PURCHASES,
+        min_receipt_samples: int = 3,
+    ) -> List[PriceDropAlert]:
         """
-        Looks at prices created for THIS receipt, creates alerts for tracked items.
-        Safe to call repeatedly (unique key prevents duplicates for same receipt/item/store).
+        Build alerts based on ACTIVE flyer deals (mapped item_id only).
+
+        Notes:
+          - 'usual' is receipt-first; if receipt samples < min_receipt_samples, we estimate.
+          - 'stock-up' requires staple AND near 6mo low (global) or near store low.
         """
-        self.ensure_tables()
+        as_of = as_of or date.today()
 
-        # Pull observed prices from this receipt for tracked items only
-        observed_rows = self._get_observed_prices_for_receipt(receipt_id)
-        created = 0
-        skipped = 0
+        # Active flyer deals (mapped items, valid date)
+        deals = prices_repo.list_active_flyer_deal_quotes(as_of=as_of)
 
-        for obs in observed_rows:
-            item_id = int(obs["item_id"])
-            store_id = int(obs["store_id"]) if obs["store_id"] is not None else None
-            observed_price = obs["unit_price"]
-            observed_date = obs["date"]
+        # Optional: preference engine
+        effective = None
+        if preferences_service is not None:
+            try:
+                effective = preferences_service.compute_effective_preferences()
+            except Exception:
+                effective = None
 
-            if observed_price is None:
-                skipped += 1
+        alerts: List[PriceDropAlert] = []
+
+        for d in deals:
+            item_id = d.get("item_id")
+            store_id = d.get("store_id")
+            if item_id is None or store_id is None:
                 continue
 
-            # 1) Try same-store stats
-            avg_store, n_store = self._avg_for_item(
-                item_id=item_id,
-                store_id=store_id,
-                window_days=window_days,
-                exclude_receipt_id=receipt_id,
-            ) if store_id is not None else (None, 0)
-
-            basis = None
-            avg_price = None
-            sample_count = 0
-
-            if avg_store is not None and n_store >= min_samples:
-                basis = "store"
-                avg_price = avg_store
-                sample_count = n_store
-            else:
-                # 2) Fallback overall stats (all stores)
-                avg_overall, n_overall = self._avg_for_item(
-                    item_id=item_id,
-                    store_id=None,
-                    window_days=window_days,
-                    exclude_receipt_id=receipt_id,
-                )
-                if avg_overall is not None and n_overall >= min_samples:
-                    basis = "overall"
-                    avg_price = avg_overall
-                    sample_count = n_overall
-
-            if avg_price is None or sample_count < min_samples:
-                skipped += 1
+            try:
+                item_id_i = int(item_id)
+                store_id_i = int(store_id)
+            except Exception:
                 continue
 
-            drop = _percent_drop(avg_price, float(observed_price))
-            if drop < float(threshold_percent):
-                skipped += 1
+            item_name = str(d.get("item_name") or "").strip() or "Unknown item"
+            store_name = str(d.get("store_name") or "").strip() or "Unknown store"
+
+            # Preference: hard-exclude blocks the alert entirely
+            if effective is not None:
+                try:
+                    if preferences_service.is_hard_excluded(item_name, effective):
+                        continue
+                except Exception:
+                    pass
+
+            try:
+                current = float(d.get("unit_price"))
+            except Exception:
                 continue
 
-            # Insert alert (unique prevents duplicates)
-            ok = self._insert_alert(
-                receipt_id=receipt_id,
-                item_id=item_id,
-                store_id=store_id,
-                observed_date=observed_date,
-                observed_unit_price=float(observed_price),
-                window_days=window_days,
-                avg_price=float(avg_price),
-                sample_count=int(sample_count),
-                percent_drop=float(drop),
-                threshold_percent=float(threshold_percent),
-                basis=basis or "overall",
+            unit = str(d.get("unit") or "").strip().lower()
+            valid_to = d.get("valid_to")
+
+            # Usual (receipt-first, store-specific)
+            usual_info = prices_repo.get_usual_unit_price_for_store(
+                item_id_i,
+                store_id_i,
+                days=usual_window_days,
+                as_of=as_of,
+                min_receipt_samples=min_receipt_samples,
+            )
+            usual = usual_info.get("usual_price")
+            usual_source = str(usual_info.get("usual_source") or "unknown")
+            receipt_samples = int(usual_info.get("receipt_samples") or 0)
+
+            # 6-month lows
+            low_store = prices_repo.get_six_month_low_for_store(
+                item_id_i, store_id_i, days=usual_window_days, as_of=as_of
+            )
+            low_global = prices_repo.get_six_month_low_global(
+                item_id_i, days=usual_window_days, as_of=as_of
+            )
+            month_low = prices_repo.get_month_low_for_store(
+                item_id_i, store_id_i, days=30, as_of=as_of
             )
 
-            if ok:
-                created += 1
+            # Staple learning (receipt frequency)
+            staple_count = prices_repo.get_receipt_purchase_count(
+                item_id_i, days=staple_window_days, as_of=as_of
+            )
+            is_staple = staple_count >= int(staple_min_purchases)
+
+            # Trigger logic
+            below_usual = False
+            near_6mo_low = False
+            near_month_low = False
+
+            pct_below_usual: Optional[float] = None
+            pct_above_low_6mo: Optional[float] = None
+            pct_above_month_low: Optional[float] = None
+
+            if usual is not None and usual > 0:
+                pct_below_usual = max(0.0, (usual - current) / usual)
+                below_usual = current <= (usual * (1.0 - float(drop_threshold)))
+
+            # Near-low checks (prefer global, but still compute store)
+            ref_low = None
+            if low_global is not None and low_global > 0:
+                ref_low = low_global
+            elif low_store is not None and low_store > 0:
+                ref_low = low_store
+
+            if ref_low is not None and ref_low > 0:
+                pct_above_low_6mo = max(0.0, (current - ref_low) / ref_low)
+                near_6mo_low = current <= (ref_low * (1.0 + float(near_low_margin)))
+
+            if month_low is not None and month_low > 0:
+                pct_above_month_low = max(0.0, (current - month_low) / month_low)
+                near_month_low = current <= (month_low * (1.0 + float(near_month_low_margin)))
+
+            # Decide alert type
+            # - Drop alerts can fire even if not staple (still useful)
+            # - Stock-up requires staple AND near 6mo low (and optionally near month-low)
+            want_stock_up = is_staple and near_6mo_low
+            want_drop = below_usual
+
+            if not want_drop and not want_stock_up:
+                continue
+
+            if want_drop and want_stock_up:
+                alert_type = "BOTH"
+            elif want_stock_up:
+                alert_type = "STOCK_UP"
             else:
-                skipped += 1
+                alert_type = "DROP_BELOW_USUAL"
 
-        return AlertCreateResult(created_count=created, skipped_count=skipped)
+            # Soft-exclude annotation (optional)
+            soft_by: Optional[List[str]] = None
+            soft_hit: Optional[str] = None
+            if effective is not None:
+                try:
+                    soft_by = preferences_service.soft_excluded_by_members(item_name, effective)
+                    soft_hit = preferences_service.explain_soft_exclude_hit(item_name, effective)
+                    if soft_by and not isinstance(soft_by, list):
+                        soft_by = list(soft_by)
+                except Exception:
+                    soft_by = None
+                    soft_hit = None
 
-    def detect_for_recent_receipts(
-        self,
-        *,
-        receipts_days_back: int = 7,
-        threshold_percent: float = 20.0,
-        window_days: int = 45,
-        min_samples: int = 3,
-    ) -> AlertCreateResult:
-        """
-        Convenience: scan recent receipts and create alerts.
-        """
-        self.ensure_tables()
-        receipt_ids = self._get_recent_receipt_ids(days_back=receipts_days_back)
+            warnings: List[str] = []
+            if usual is None:
+                warnings.append("No usual price history for this item/store.")
+            elif usual_source != "receipt":
+                warnings.append("Usual price estimated (receipt history is sparse).")
 
-        total_created = 0
-        total_skipped = 0
-        for rid in receipt_ids:
-            res = self.detect_for_receipt(
-                rid,
-                threshold_percent=threshold_percent,
-                window_days=window_days,
-                min_samples=min_samples,
+            if low_global is None and low_store is None:
+                warnings.append("No 6-month low history for this item.")
+
+            # Score/sort key: prefer bigger savings, then staples
+            # (we keep score internal; window sorts by fields too)
+            alert = PriceDropAlert(
+                alert_type=alert_type,
+                item_id=item_id_i,
+                item_name=item_name,
+                store_id=store_id_i,
+                store_name=store_name,
+                current_unit_price=current,
+                unit=unit,
+                valid_to=valid_to,
+                usual_unit_price=float(usual) if usual is not None else None,
+                usual_source=usual_source,
+                receipt_samples=receipt_samples,
+                low_6mo_store=low_store,
+                low_6mo_global=low_global,
+                month_low_store=month_low,
+                pct_below_usual=pct_below_usual,
+                pct_above_low_6mo=pct_above_low_6mo,
+                pct_above_month_low=pct_above_month_low,
+                staple_purchases_90d=int(staple_count),
+                is_staple=is_staple,
+                soft_excluded_by=soft_by,
+                soft_exclude_hit=soft_hit,
+                warnings=warnings or None,
             )
-            total_created += res.created_count
-            total_skipped += res.skipped_count
+            alerts.append(alert)
 
-        return AlertCreateResult(created_count=total_created, skipped_count=total_skipped)
+        # Sort: biggest % below usual first, then stock-up, then staples, then price
+        def _sort_key(a: PriceDropAlert) -> tuple:
+            pct = a.pct_below_usual if a.pct_below_usual is not None else 0.0
+            stock = 1 if a.alert_type in ("STOCK_UP", "BOTH") else 0
+            staple = 1 if a.is_staple else 0
+            return (-pct, -stock, -staple, a.current_unit_price)
 
-    def list_open_alerts(self, limit: int = 250) -> List[Dict[str, Any]]:
-        self.ensure_tables()
-        with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    a.id,
-                    a.created_at,
-                    a.receipt_id,
-                    a.item_id,
-                    COALESCE(i.canonical_name, '') as item_name,
-                    a.store_id,
-                    COALESCE(s.name, '') as store_name,
-                    a.observed_date,
-                    a.observed_unit_price,
-                    a.avg_price,
-                    a.sample_count,
-                    a.percent_drop,
-                    a.threshold_percent,
-                    a.basis
-                FROM price_drop_alerts a
-                LEFT JOIN items i ON i.id = a.item_id
-                LEFT JOIN stores s ON s.id = a.store_id
-                WHERE a.status = 'open'
-                ORDER BY a.id DESC
-                LIMIT ?;
-                """,
-                (int(limit),),
-            ).fetchall()
-
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            out.append(
-                {
-                    "id": int(r[0]),
-                    "created_at": r[1],
-                    "receipt_id": r[2],
-                    "item_id": r[3],
-                    "item_name": r[4],
-                    "store_id": r[5],
-                    "store_name": r[6],
-                    "observed_date": r[7],
-                    "observed_unit_price": r[8],
-                    "avg_price": r[9],
-                    "sample_count": r[10],
-                    "percent_drop": r[11],
-                    "threshold_percent": r[12],
-                    "basis": r[13],
-                }
-            )
-        return out
-
-    def dismiss_alert(self, alert_id: int) -> None:
-        self.ensure_tables()
-        with get_connection() as conn:
-            conn.execute(
-                "UPDATE price_drop_alerts SET status = 'dismissed' WHERE id = ?;",
-                (int(alert_id),),
-            )
-            conn.commit()
-
-    def dismiss_all(self) -> None:
-        self.ensure_tables()
-        with get_connection() as conn:
-            conn.execute("UPDATE price_drop_alerts SET status = 'dismissed' WHERE status = 'open';")
-            conn.commit()
-
-    # -------------------- Internal helpers --------------------
-
-    def _get_observed_prices_for_receipt(self, receipt_id: int) -> List[Dict[str, Any]]:
-        """
-        Pull prices from this receipt for tracked items only.
-        """
-        with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    p.item_id,
-                    p.store_id,
-                    p.unit_price,
-                    p.date
-                FROM prices p
-                JOIN items i ON i.id = p.item_id
-                WHERE p.receipt_id = ?
-                  AND p.source = 'receipt'
-                  AND i.is_tracked = 1
-                  AND p.unit_price IS NOT NULL;
-                """,
-                (int(receipt_id),),
-            ).fetchall()
-
-        return [
-            {"item_id": r[0], "store_id": r[1], "unit_price": r[2], "date": r[3]}
-            for r in rows
-        ]
-
-    def _avg_for_item(
-        self,
-        *,
-        item_id: int,
-        store_id: Optional[int],
-        window_days: int,
-        exclude_receipt_id: int,
-    ) -> Tuple[Optional[float], int]:
-        """
-        Average unit_price over last window_days.
-        Excludes the current receipt_id so you compare against "recent history".
-        """
-        with get_connection() as conn:
-            if store_id is None:
-                rows = conn.execute(
-                    """
-                    SELECT unit_price
-                    FROM prices
-                    WHERE item_id = ?
-                      AND unit_price IS NOT NULL
-                      AND source = 'receipt'
-                      AND receipt_id <> ?
-                      AND date >= date('now', ?)
-                    """,
-                    (int(item_id), int(exclude_receipt_id), f"-{int(window_days)} days"),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT unit_price
-                    FROM prices
-                    WHERE item_id = ?
-                      AND store_id = ?
-                      AND unit_price IS NOT NULL
-                      AND source = 'receipt'
-                      AND receipt_id <> ?
-                      AND date >= date('now', ?)
-                    """,
-                    (int(item_id), int(store_id), int(exclude_receipt_id), f"-{int(window_days)} days"),
-                ).fetchall()
-
-        vals = [float(r[0]) for r in rows if r and r[0] is not None]
-        if not vals:
-            return None, 0
-        return (sum(vals) / len(vals), len(vals))
-
-    def _insert_alert(
-        self,
-        *,
-        receipt_id: int,
-        item_id: int,
-        store_id: Optional[int],
-        observed_date: Optional[str],
-        observed_unit_price: float,
-        window_days: int,
-        avg_price: float,
-        sample_count: int,
-        percent_drop: float,
-        threshold_percent: float,
-        basis: str,
-    ) -> bool:
-        """
-        Returns True if inserted, False if ignored (duplicate).
-        """
-        with get_connection() as conn:
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO price_drop_alerts (
-                    created_at, status,
-                    receipt_id, item_id, store_id,
-                    observed_date, observed_unit_price,
-                    avg_window_days, avg_price, sample_count,
-                    percent_drop, threshold_percent, basis, note
-                )
-                VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """,
-                (
-                    _now_utc_iso(),
-                    int(receipt_id),
-                    int(item_id),
-                    int(store_id) if store_id is not None else None,
-                    observed_date,
-                    float(observed_unit_price),
-                    int(window_days),
-                    float(avg_price),
-                    int(sample_count),
-                    float(percent_drop),
-                    float(threshold_percent),
-                    basis,
-                    None,
-                ),
-            )
-            conn.commit()
-
-        # sqlite: rowcount is 1 when inserted, 0 when ignored
-        return getattr(cur, "rowcount", 0) == 1
-
-    def _get_recent_receipt_ids(self, *, days_back: int) -> List[int]:
-        with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id
-                FROM receipts
-                WHERE purchase_date >= date('now', ?)
-                ORDER BY id DESC;
-                """,
-                (f"-{int(days_back)} days",),
-            ).fetchall()
-        return [int(r[0]) for r in rows]
+        alerts.sort(key=_sort_key)
+        return alerts[: int(limit)]
