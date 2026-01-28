@@ -40,7 +40,7 @@ from Grocery_Sense.services.demo_seed_service import seed_demo_data
 from Grocery_Sense.ui.deal_feed_window import open_deal_feed_window
 from Grocery_Sense.ui.flyer_import_window import open_flyer_import_window
 from Grocery_Sense.ui.item_manager_window import open_item_manager_window
-from Grocery_Sense.ui.preferences_window import open_preferences_window
+from Grocery_Sense.ui.preference_window import open_preferences_window
 from Grocery_Sense.ui.price_history_window import open_price_history_window
 from Grocery_Sense.ui.receipt_import_window import open_receipt_import_window
 from Grocery_Sense.ui.receipt_browser_window import open_receipt_browser_window
@@ -163,21 +163,21 @@ class GrocerySenseApp(tk.Tk):
         ).grid(row=row, column=0, sticky="w", pady=2)
         row += 1
 	
-	ttk.Button(
+        ttk.Button(
     	    frame,
     	    text="11) Preferences",
     	    command=self._safe_call(lambda: open_preferences_window(self, log=self._log)),
     	    width=35,
-	).grid(row=row, column=0, sticky="w", pady=2)
-	row += 1
+	    ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
 
-	ttk.Button(
+        ttk.Button(
     	    frame,
     	    text="12) Deal Feed (Active)",
     	    command=self._safe_call(lambda: open_deal_feed_window(self, log=self._log)),
     	    width=35,
-	).grid(row=row, column=0, sticky="w", pady=2)
-	row += 1
+	    ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
 
         ttk.Button(
             frame,
