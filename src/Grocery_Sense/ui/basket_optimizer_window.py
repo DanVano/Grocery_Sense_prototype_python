@@ -5,6 +5,7 @@ from tkinter import ttk, messagebox
 from typing import Callable, Optional
 
 from Grocery_Sense.services.basket_optimizer_service import BasketOptimizerService, BasketOptimizationResult
+from Grocery_Sense.services import shopping_list_service
 
 
 class BasketOptimizerWindow(tk.Toplevel):
@@ -71,6 +72,20 @@ class BasketOptimizerWindow(tk.Toplevel):
         self._summary_text = tk.Text(summary, height=7, wrap="word")
         self._summary_text.pack(fill="x", expand=False)
 
+        # ✅ Apply plan buttons (right under Summary)
+        apply_box = ttk.Frame(summary)
+        apply_box.pack(fill="x", pady=(8, 0))
+
+        ttk.Separator(apply_box).pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            apply_box,
+            text="Apply this plan to your active shopping list:",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w")
+
+        ttk.Button(apply_box, text="Use this plan (Fast trip)", command=self._use_fast_plan).pack(anchor="w", pady=(6, 0))
+        ttk.Button(apply_box, text="Use this plan (Savings mode)", command=self._use_savings_plan).pack(anchor="w", pady=(2, 0))
+
         # Main split
         body = ttk.Frame(root)
         body.pack(fill="both", expand=True, pady=(10, 0))
@@ -114,6 +129,40 @@ class BasketOptimizerWindow(tk.Toplevel):
         ttk.Label(hint, textvariable=self._selected_item_reason, foreground="#666").pack(anchor="w")
 
         self._result: Optional[BasketOptimizationResult] = None
+
+    # ---------------- apply plan handlers ----------------
+
+    def _use_fast_plan(self) -> None:
+        if not getattr(self, "_result", None):
+            messagebox.showinfo("No plan yet", "Run the optimizer first, then you can apply a plan.", parent=self)
+            return
+
+        summary = shopping_list_service.apply_optimizer_plan_to_active_list(self._result, mode="fast")
+        if not summary.get("ok"):
+            messagebox.showerror("Plan not applied", summary.get("error", "Unknown error"), parent=self)
+            return
+
+        msg = f"Applied: {summary.get('plan_label', 'Fast trip')}\nAssigned: {summary.get('assigned', 0)}/{summary.get('attempted', 0)}"
+        if summary.get("warnings"):
+            msg += "\n\nWarnings:\n- " + "\n- ".join(summary["warnings"])
+        messagebox.showinfo("Plan applied", msg, parent=self)
+
+    def _use_savings_plan(self) -> None:
+        if not getattr(self, "_result", None):
+            messagebox.showinfo("No plan yet", "Run the optimizer first, then you can apply a plan.", parent=self)
+            return
+
+        summary = shopping_list_service.apply_optimizer_plan_to_active_list(self._result, mode="savings")
+        if not summary.get("ok"):
+            messagebox.showerror("Plan not applied", summary.get("error", "Unknown error"), parent=self)
+            return
+
+        msg = f"Applied: {summary.get('plan_label', 'Savings mode')}\nAssigned: {summary.get('assigned', 0)}/{summary.get('attempted', 0)}"
+        if summary.get("warnings"):
+            msg += "\n\nWarnings:\n- " + "\n- ".join(summary["warnings"])
+        messagebox.showinfo("Plan applied", msg, parent=self)
+
+    # ---------------- optimizer run + render ----------------
 
     def _run(self) -> None:
         try:
@@ -276,3 +325,4 @@ def open_basket_optimizer_window(
     log: Optional[Callable[[str], None]] = None,
 ) -> BasketOptimizerWindow:
     return BasketOptimizerWindow(master, log=log)
+

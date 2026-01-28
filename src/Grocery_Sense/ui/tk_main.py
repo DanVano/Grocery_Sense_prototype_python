@@ -37,6 +37,7 @@ from Grocery_Sense.services.weekly_planner_service import (
 from Grocery_Sense.services.planning_service import PlanningService
 from Grocery_Sense.services.demo_seed_service import seed_demo_data
 
+from Grocery_Sense.ui.basket_optimizer_window import open_basket_optimizer_window
 from Grocery_Sense.ui.deal_feed_window import open_deal_feed_window
 from Grocery_Sense.ui.flyer_import_window import open_flyer_import_window
 from Grocery_Sense.ui.item_manager_window import open_item_manager_window
@@ -181,7 +182,15 @@ class GrocerySenseApp(tk.Tk):
 
         ttk.Button(
             frame,
-            text="13) Flyer Import (Manual)",
+            text="13) Basket Optimizer (NEW)",
+            command=self._safe_call(lambda: open_basket_optimizer_window(self, log=self._log)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="14) Flyer Import (Manual)",
             command=self._safe_call(lambda: open_flyer_import_window(self, log=self._log)),
             width=35,
         ).grid(row=row, column=0, sticky="w", pady=2)
@@ -189,7 +198,7 @@ class GrocerySenseApp(tk.Tk):
 
         ttk.Button(
             frame,
-            text="14) Seed Demo Data",
+            text="15) Seed Demo Data",
             command=self._safe_call(self._seed_demo_data),
             width=35,
         ).grid(row=row, column=0, sticky="w", pady=2)
