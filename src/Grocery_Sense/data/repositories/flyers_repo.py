@@ -3,687 +3,526 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import date
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from Grocery_Sense.data.db import get_connection
 
 
 @dataclass
-class StoreRow:
+class FlyerDeal:
+    """A deal pulled from a flyer import batch.
+
+    NOTE: Some callers work with dict rows returned by repo methods.
+    This dataclass is kept for backward compatibility and optional typed usage.
+    """
+
     id: int
-    name: str
+    batch_id: int
+    store_id: int
+    item_name: str
+    category: str
+    title: str
+    description: str
+    price: float
+    unit_price: Optional[float]
+    unit: str
+    image_url: str
+    valid_from: str
+    valid_to: str
+    created_at: str
+
+
+def _norm(s: Any) -> str:
+    return re.sub(r"\s+", " ", str(s or "").strip().lower()).strip()
+
+
+def _split_words(phrase: str) -> List[str]:
+    phrase = _norm(phrase)
+    if not phrase:
+        return []
+    return [w for w in re.split(r"\s+", phrase) if w]
+
+
+def _compile_phrase_regex(phrase: str) -> Optional[re.Pattern]:
+    """
+    Phrase-safe matcher:
+      - enforces word boundaries
+      - allows common separators between words (space, hyphen, slash, punctuation)
+    """
+    words = _split_words(phrase)
+    if not words:
+        return None
+
+    # Allow separators between multi-word phrases
+    sep = r"(?:\s|[-/.,()])+"  # cheap + effective
+    if len(words) == 1:
+        pat = rf"\b{re.escape(words[0])}\b"
+    else:
+        pat = r"\b" + sep.join(re.escape(w) for w in words) + r"\b"
+    return re.compile(pat, flags=re.IGNORECASE)
+
+
+def _find_spans(text: str, phrases: Iterable[str]) -> List[Tuple[int, int, str]]:
+    """Return spans (start, end, phrase) for protected phrases found in text."""
+    spans: List[Tuple[int, int, str]] = []
+    for ph in phrases:
+        rx = _compile_phrase_regex(ph)
+        if not rx:
+            continue
+        for m in rx.finditer(text):
+            spans.append((m.start(), m.end(), _norm(ph)))
+    spans.sort(key=lambda t: (t[0], -(t[1] - t[0])))
+    return spans
+
+
+def _span_overlaps(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
+    return not (a[1] <= b[0] or b[1] <= a[0])
+
+
+def _is_within_protected(
+    match_span: Tuple[int, int],
+    protected_spans: Sequence[Tuple[int, int, str]],
+    *,
+    allow_if_phrase_equals: Optional[str] = None,
+) -> bool:
+    """True if match_span overlaps any protected span (unless it's the same phrase)."""
+    allow = _norm(allow_if_phrase_equals or "")
+    for s, e, ph in protected_spans:
+        if allow and ph == allow:
+            continue
+        if _span_overlaps(match_span, (s, e)):
+            return True
+    return False
+
+
+def _best_phrase_hit(
+    text: str,
+    phrases: Sequence[str],
+    protected_spans: Sequence[Tuple[int, int, str]],
+) -> Optional[Tuple[str, Tuple[int, int]]]:
+    """
+    Return (phrase, (start,end)) for the best match in `text`, skipping matches inside protected spans.
+    "Best" = first match among phrases sorted by length desc (caller should sort).
+    """
+    for ph in phrases:
+        rx = _compile_phrase_regex(ph)
+        if not rx:
+            continue
+        for m in rx.finditer(text):
+            span = (m.start(), m.end())
+            if _is_within_protected(span, protected_spans, allow_if_phrase_equals=ph):
+                continue
+            return (_norm(ph), span)
+    return None
+
+
+def _extract_text_window(text: str, span: Tuple[int, int], *, pad: int = 24) -> str:
+    """Return a short snippet around the match span (for tooltips/debug)."""
+    s, e = span
+    lo = max(0, s - pad)
+    hi = min(len(text), e + pad)
+    return text[lo:hi].strip()
 
 
 class FlyersRepo:
-    """
-    Stores flyer imports and deals in SQLite.
-
-    Tables:
-      - stores
-      - flyer_batches   (store_id + valid_from/to)
-      - flyer_deals     (individual deal rows linked to flyer_batches)
-    """
-
-    # -------------------------------------------------------------------------
-    # Schema
-    # -------------------------------------------------------------------------
+    def __init__(self) -> None:
+        self.ensure_schema()
 
     def ensure_schema(self) -> None:
         with get_connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS stores (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
+            cur = conn.cursor()
 
-            conn.execute(
+            # Import batches (one per flyer import run)
+            cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS flyer_batches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,          -- e.g. 'flipp', 'manual_pdf'
                     store_id INTEGER NOT NULL,
+                    flyer_name TEXT,
                     valid_from TEXT,
                     valid_to TEXT,
-                    source TEXT,
-                    source_label TEXT,
-                    imported_at TEXT NOT NULL,
-                    FOREIGN KEY(store_id) REFERENCES stores(id)
+                    status TEXT DEFAULT 'active',  -- active, archived
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
 
-            conn.execute(
+            # Track assets (pdf/image) if needed
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS flyer_assets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id INTEGER NOT NULL,
+                    asset_type TEXT NOT NULL,      -- 'pdf', 'image'
+                    path TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(batch_id) REFERENCES flyer_batches(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            # Optional: store raw json from import
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS flyer_raw_json (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id INTEGER NOT NULL,
+                    json TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(batch_id) REFERENCES flyer_batches(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            # Deals extracted from flyers
+            cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS flyer_deals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    flyer_id INTEGER NOT NULL,
+                    batch_id INTEGER NOT NULL,
                     store_id INTEGER NOT NULL,
-                    page_index INTEGER,
+                    item_name TEXT,
+                    category TEXT,
                     title TEXT,
                     description TEXT,
-                    price_text TEXT,
-                    deal_qty REAL,
-                    deal_total REAL,
+                    price REAL,
                     unit_price REAL,
                     unit TEXT,
-                    norm_unit_price REAL,
-                    norm_unit TEXT,
-                    norm_note TEXT,
-                    item_id TEXT,
-                    mapping_confidence REAL,
-                    confidence REAL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(flyer_id) REFERENCES flyer_batches(id),
-                    FOREIGN KEY(store_id) REFERENCES stores(id)
+                    image_url TEXT,
+                    valid_from TEXT,
+                    valid_to TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(batch_id) REFERENCES flyer_batches(id) ON DELETE CASCADE
                 )
                 """
             )
 
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_flyer_deals_flyer_id ON flyer_deals(flyer_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_flyer_deals_store_id ON flyer_deals(store_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_flyer_batches_store_id ON flyer_batches(store_id)")
-
             conn.commit()
 
-    # -------------------------------------------------------------------------
-    # Stores
-    # -------------------------------------------------------------------------
+    # ---------------- batch ops ----------------
 
-    def upsert_store(self, name: str) -> int:
-        self.ensure_schema()
-        name = (name or "").strip()
-        if not name:
-            raise ValueError("Store name is required")
-
-        now = datetime.utcnow().isoformat(timespec="seconds")
-
-        with get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO stores (name, created_at)
-                VALUES (?, ?)
-                ON CONFLICT(name) DO UPDATE SET name=excluded.name
-                """,
-                (name, now),
-            )
-            row = conn.execute("SELECT id FROM stores WHERE name = ?", (name,)).fetchone()
-            if not row:
-                raise RuntimeError("Failed to upsert store")
-            conn.commit()
-            return int(row["id"])
-
-    def list_stores(self) -> List[StoreRow]:
-        self.ensure_schema()
-        with get_connection() as conn:
-            rows = conn.execute("SELECT id, name FROM stores ORDER BY name ASC").fetchall()
-        out: List[StoreRow] = []
-        for r in rows:
-            out.append(StoreRow(id=int(r["id"]), name=str(r["name"])))
-        return out
-
-    # -------------------------------------------------------------------------
-    # Flyer batches
-    # -------------------------------------------------------------------------
-
-    def create_flyer_batch(
+    def create_batch(
         self,
         *,
+        source: str,
         store_id: int,
-        valid_from: Optional[str],
-        valid_to: Optional[str],
-        source: Optional[str] = None,
-        source_label: Optional[str] = None,
+        flyer_name: str = "",
+        valid_from: str = "",
+        valid_to: str = "",
+        status: str = "active",
     ) -> int:
-        self.ensure_schema()
-        now = datetime.utcnow().isoformat(timespec="seconds")
-
         with get_connection() as conn:
-            conn.execute(
+            cur = conn.cursor()
+            cur.execute(
                 """
-                INSERT INTO flyer_batches (store_id, valid_from, valid_to, source, source_label, imported_at)
+                INSERT INTO flyer_batches (source, store_id, flyer_name, valid_from, valid_to, status)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (int(store_id), valid_from, valid_to, source, source_label, now),
+                (source, store_id, flyer_name, valid_from, valid_to, status),
             )
-            flyer_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
             conn.commit()
-            return int(flyer_id)
+            return int(cur.lastrowid)
 
-    # -------------------------------------------------------------------------
-    # Deals
-    # -------------------------------------------------------------------------
-
-    def add_deal(
-        self,
-        *,
-        flyer_id: int,
-        store_id: int,
-        page_index: Optional[int],
-        title: Optional[str],
-        description: Optional[str],
-        price_text: Optional[str],
-        deal_qty: Optional[float],
-        deal_total: Optional[float],
-        unit_price: Optional[float],
-        unit: Optional[str],
-        norm_unit_price: Optional[float],
-        norm_unit: Optional[str],
-        norm_note: Optional[str],
-        item_id: Optional[str],
-        mapping_confidence: Optional[float],
-        confidence: Optional[float],
-    ) -> int:
-        self.ensure_schema()
-        now = datetime.utcnow().isoformat(timespec="seconds")
-
+    def set_batch_status(self, batch_id: int, status: str) -> None:
         with get_connection() as conn:
             conn.execute(
-                """
-                INSERT INTO flyer_deals (
-                    flyer_id, store_id, page_index, title, description, price_text,
-                    deal_qty, deal_total, unit_price, unit,
-                    norm_unit_price, norm_unit, norm_note,
-                    item_id, mapping_confidence, confidence, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(flyer_id),
-                    int(store_id),
-                    page_index,
-                    title,
-                    description,
-                    price_text,
-                    deal_qty,
-                    deal_total,
-                    unit_price,
-                    unit,
-                    norm_unit_price,
-                    norm_unit,
-                    norm_note,
-                    item_id,
-                    mapping_confidence,
-                    confidence,
-                    now,
-                ),
+                "UPDATE flyer_batches SET status = ? WHERE id = ?",
+                (status, batch_id),
             )
-            deal_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
             conn.commit()
-            return int(deal_id)
 
-    def list_deals_for_flyer(
-        self,
-        flyer_id: int,
-        *,
-        apply_preferences: bool = True,
-        include_soft_excluded: bool = True,
-        include_disallowed_oils: bool = False,
-    ) -> List[Dict[str, Any]]:
-        self.ensure_schema()
+    def list_batches(self, *, store_id: Optional[int] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM flyer_batches"
+        args: List[Any] = []
+        if store_id is not None:
+            sql += " WHERE store_id = ?"
+            args.append(store_id)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        args.append(limit)
 
         with get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, args).fetchall()
+            return [dict(r) for r in rows]
+
+    # ---------------- deal ops ----------------
+
+    def insert_deals(self, batch_id: int, store_id: int, deals: List[Dict[str, Any]]) -> int:
+        """
+        Insert normalized deals (from import/parse step). Each deal dict can include:
+          item_name, category, title, description, price, unit_price, unit, image_url, valid_from, valid_to
+        """
+        if not deals:
+            return 0
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            count = 0
+            for d in deals:
+                cur.execute(
+                    """
+                    INSERT INTO flyer_deals (
+                        batch_id, store_id, item_name, category, title, description,
+                        price, unit_price, unit, image_url, valid_from, valid_to
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        batch_id,
+                        store_id,
+                        d.get("item_name", ""),
+                        d.get("category", ""),
+                        d.get("title", ""),
+                        d.get("description", ""),
+                        d.get("price", None),
+                        d.get("unit_price", None),
+                        d.get("unit", ""),
+                        d.get("image_url", ""),
+                        d.get("valid_from", ""),
+                        d.get("valid_to", ""),
+                    ),
+                )
+                count += 1
+
+            conn.commit()
+            return count
+
+    def list_deals_for_batch(self, batch_id: int) -> List[Dict[str, Any]]:
+        with get_connection() as conn:
+            conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT
-                    d.id,
-                    d.flyer_id,
-                    d.store_id,
-                    s.name as store_name,
-                    d.page_index,
-                    d.title,
-                    d.description,
-                    d.price_text,
-                    d.deal_qty,
-                    d.deal_total,
-                    d.unit_price,
-                    d.unit,
-                    d.norm_unit_price,
-                    d.norm_unit,
-                    d.norm_note,
-                    d.item_id,
-                    d.mapping_confidence,
-                    d.confidence,
-                    d.created_at
-                FROM flyer_deals d
-                JOIN stores s ON s.id = d.store_id
-                WHERE d.flyer_id = ?
-                ORDER BY
-                    s.name ASC,
-                    (d.norm_unit_price IS NULL) ASC,
-                    d.norm_unit_price ASC,
-                    d.created_at DESC
+                SELECT * FROM flyer_deals
+                WHERE batch_id = ?
+                ORDER BY price ASC
                 """,
-                (int(flyer_id),),
+                (batch_id,),
             ).fetchall()
+            return [dict(r) for r in rows]
 
-        deals: List[Dict[str, Any]] = []
-        for r in rows:
-            deals.append(
-                {
-                    "id": r["id"],
-                    "flyer_id": r["flyer_id"],
-                    "store_id": r["store_id"],
-                    "store_name": r["store_name"],
-                    "page_index": r["page_index"],
-                    "title": r["title"] or "",
-                    "description": r["description"] or "",
-                    "price_text": r["price_text"] or "",
-                    "deal_qty": r["deal_qty"],
-                    "deal_total": r["deal_total"],
-                    "unit_price": r["unit_price"],
-                    "unit": r["unit"] or "",
-                    "norm_unit_price": r["norm_unit_price"],
-                    "norm_unit": r["norm_unit"] or "",
-                    "norm_note": r["norm_note"] or "",
-                    "item_id": r["item_id"],
-                    "mapping_confidence": r["mapping_confidence"],
-                    "confidence": r["confidence"],
-                    "created_at": r["created_at"],
-                }
-            )
-
-        if not deals:
-            return []
-
-        if apply_preferences:
-            eff = self._try_get_effective_preferences()
-            if eff is not None:
-                deals = self._apply_preferences_to_deals(
-                    deals,
-                    eff,
-                    filter_disallowed_oils=not include_disallowed_oils,
-                )
-
-        if not include_soft_excluded:
-            deals = [
-                d
-                for d in deals
-                if not (isinstance(d.get("pref_soft_excluded_by"), list) and len(d.get("pref_soft_excluded_by") or []) > 0)
-            ]
-
-        return deals
+    # ---------------- Milestone 1: preference-aware deal feed ----------------
 
     def list_active_deals(
         self,
         *,
-        store_id: Optional[int] = None,
-        as_of: Optional[str] = None,
-        limit: int = 500,
-        apply_preferences: bool = True,
-        include_soft_excluded: bool = True,
-        include_disallowed_oils: bool = False,
+        on_date: Optional[str] = None,
+        store_ids: Optional[List[int]] = None,
+        limit: int = 5000,
+        preferences_aware: bool = True,
+        filter_disallowed_oils: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        Return deals from flyer batches that are ACTIVE as of a date.
+        Return ONLY deals that belong to an ACTIVE batch AND are valid for `on_date`.
 
-        Active = flyer_batches.valid_from <= as_of <= flyer_batches.valid_to
-        (dates are compared as YYYY-MM-DD strings; SQLite date() is used).
-
-        If apply_preferences=True and preferences_service is available, this will:
-        - remove hard-excluded items (allergies + master hard excludes)
-        - optionally remove disallowed oils (baseline oils_allowed)
-        - annotate soft-excluded deals via `pref_soft_excluded_by` + `pref_oil_allowed`
+        - Hard excluded items are removed (if preferences_aware + prefs available)
+        - Soft excluded items are kept but de-ranked + annotated with pref_* fields
+        - Disallowed oils can be filtered (filter_disallowed_oils=True) or annotated
         """
-        if not as_of:
-            as_of = datetime.now().date().isoformat()
+        day = (on_date or date.today().isoformat()).strip()
 
         sql = """
             SELECT
-                d.id,
-                d.flyer_id,
-                d.store_id,
-                s.name as store_name,
-                b.valid_from as flyer_valid_from,
-                b.valid_to as flyer_valid_to,
-                d.page_index,
-                d.title,
-                d.description,
-                d.price_text,
-                d.deal_qty,
-                d.deal_total,
-                d.unit_price,
-                d.unit,
-                d.norm_unit_price,
-                d.norm_unit,
-                d.norm_note,
-                d.item_id,
-                d.mapping_confidence,
-                d.confidence,
-                d.created_at
+                d.*,
+                b.valid_from AS batch_valid_from,
+                b.valid_to   AS batch_valid_to,
+                b.flyer_name AS batch_flyer_name
             FROM flyer_deals d
-            JOIN flyer_batches b ON b.id = d.flyer_id
-            JOIN stores s ON s.id = d.store_id
-            WHERE
-                b.valid_from IS NOT NULL AND b.valid_to IS NOT NULL
-                AND TRIM(b.valid_from) <> '' AND TRIM(b.valid_to) <> ''
-                AND date(b.valid_from) <= date(?)
-                AND date(b.valid_to) >= date(?)
+            JOIN flyer_batches b ON b.id = d.batch_id
+            WHERE b.status = 'active'
+              AND (
+                    (b.valid_from IS NULL OR b.valid_from = '' OR date(?) >= date(b.valid_from))
+                AND (b.valid_to   IS NULL OR b.valid_to   = '' OR date(?) <= date(b.valid_to))
+              )
         """
-        params: List[Any] = [as_of, as_of]
+        args: List[Any] = [day, day]
 
-        if store_id is not None:
-            sql += """ AND d.store_id = ? """
-            params.append(int(store_id))
+        if store_ids:
+            placeholders = ",".join("?" for _ in store_ids)
+            sql += f" AND d.store_id IN ({placeholders})"
+            args.extend(store_ids)
 
-        sql += """
-            ORDER BY
-                s.name ASC,
-                (d.norm_unit_price IS NULL) ASC,
-                d.norm_unit_price ASC,
-                d.created_at DESC
-            LIMIT ?
-        """
-        params.append(int(limit))
+        sql += " ORDER BY d.price ASC LIMIT ?"
+        args.append(limit)
 
         with get_connection() as conn:
-            rows = conn.execute(sql, params).fetchall()
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, args).fetchall()
+            deals = [dict(r) for r in rows]
 
-        deals: List[Dict[str, Any]] = []
-        for r in rows:
-            deals.append(
-                {
-                    "id": r["id"],
-                    "flyer_id": r["flyer_id"],
-                    "store_id": r["store_id"],
-                    "store_name": r["store_name"],
-                    "flyer_valid_from": r["flyer_valid_from"],
-                    "flyer_valid_to": r["flyer_valid_to"],
-                    "page_index": r["page_index"],
-                    "title": r["title"] or "",
-                    "description": r["description"] or "",
-                    "price_text": r["price_text"] or "",
-                    "deal_qty": r["deal_qty"],
-                    "deal_total": r["deal_total"],
-                    "unit_price": r["unit_price"],
-                    "unit": r["unit"] or "",
-                    "norm_unit_price": r["norm_unit_price"],
-                    "norm_unit": r["norm_unit"] or "",
-                    "norm_note": r["norm_note"] or "",
-                    "item_id": r["item_id"],
-                    "mapping_confidence": r["mapping_confidence"],
-                    "confidence": r["confidence"],
-                    "created_at": r["created_at"],
-                }
-            )
+        if not preferences_aware:
+            return deals
 
-        if not deals:
-            return []
-
-        if apply_preferences:
-            eff = self._try_get_effective_preferences()
-            if eff is not None:
-                deals = self._apply_preferences_to_deals(
-                    deals,
-                    eff,
-                    filter_disallowed_oils=not include_disallowed_oils,
-                )
-
-        if not include_soft_excluded:
-            deals = [
-                d
-                for d in deals
-                if not (isinstance(d.get("pref_soft_excluded_by"), list) and len(d.get("pref_soft_excluded_by") or []) > 0)
-            ]
-
-        return deals
-
-    # -------------------------------------------------------------------------
-    # Preferences integration (fail-safe)
-    # -------------------------------------------------------------------------
-
-    def _try_get_effective_preferences(self) -> Any:
-        """
-        Returns an EffectivePreferences-like object if available, else None.
-
-        We avoid hard dependencies so repo still works even if prefs aren't wired yet.
-        """
+        # Preferences are optional/fail-safe: if not available, return raw deals.
         try:
-            from Grocery_Sense.services.preferences_service import compute_effective_preferences
+            from Grocery_Sense.services import preferences_service  # local import to avoid cycles
 
-            return compute_effective_preferences()
+            eff = preferences_service.compute_effective_preferences()
+            return self._apply_preferences_to_deals(
+                deals,
+                eff,
+                filter_disallowed_oils=filter_disallowed_oils,
+                oils_catalog=list(getattr(preferences_service, "OILS", [])),
+            )
         except Exception:
-            return None
+            return deals
 
     def _apply_preferences_to_deals(
         self,
         deals: List[Dict[str, Any]],
         eff: Any,
         *,
-        filter_disallowed_oils: bool = True,
+        filter_disallowed_oils: bool,
+        oils_catalog: List[str],
     ) -> List[Dict[str, Any]]:
         """
-        Applies household preference rules to raw flyer deals.
+        Adds fields used by the UI:
+          pref_soft_excluded: bool
+          pref_soft_excluders_all: [names]
+          pref_soft_excluders_secondary: [names] (best-effort)
+          pref_soft_strength_count / label
+          pref_hit: the ingredient phrase that matched
+          pref_hit_text: a snippet showing where it matched
+          pref_oil_allowed: bool|None
+          pref_oil_hit: oil phrase hit (if any)
 
-        Rules:
-          - allergies always hard exclude
-          - master hard excludes override all
-<<<<<<< HEAD
-          - secondary excludes become soft excludes (we annotate with pref_soft_excluded_by)
-=======
-          - secondary excludes become soft excludes (we annotate with who + what matched)
->>>>>>> f6b52b15a93ede3e237609b6fb89fcaa0ad9b391
-          - optionally filter oils based on baseline oils_allowed (or annotate via pref_oil_allowed)
+        Returns filtered + sorted list.
         """
-        if not deals:
-            return deals
 
-<<<<<<< HEAD
-        # If EffectivePreferences contract is missing, fail safe
-        hard_set = set(getattr(eff, "hard_excludes", []) or [])
-        soft_map = getattr(eff, "soft_excludes_by_member", {}) or {}
-        oils_allowed = set(getattr(eff, "oils_allowed", []) or [])
+        # Pull rules from effective preferences with defensive defaults.
+        hard_excludes: List[str] = sorted(set(getattr(eff, "hard_excludes", []) or []), key=len, reverse=True)
 
-        # Determine oils list (fallback to preferences_service.OILS if present)
-        oils_list: List[str] = []
+        soft_map: Dict[str, List[str]] = getattr(eff, "soft_excludes", {}) or {}
+        soft_phrases: List[str] = sorted(set(soft_map.keys()), key=len, reverse=True)
+
+        # Protected phrases: if a match happens inside these, ignore it unless the phrase itself matches.
+        # This is where you add "ingredients that won't be touched".
+        protected_phrases = sorted(
+            {
+                *_norm(o) for o in (oils_catalog or [])
+                if _norm(o)
+            }
+            | {
+                # common oil phrases that should not trip generic ingredient matches:
+                "olive oil",
+                "extra virgin olive oil",
+                "avocado oil",
+                "canola oil",
+                "vegetable oil",
+                "sunflower oil",
+                "grapeseed oil",
+            }
+        )
+
+        # For stronger soft-exclude labeling (e.g., 3/5 members): best-effort.
+        total_members = None
         try:
-            from Grocery_Sense.services import preferences_service
+            from Grocery_Sense import config_store
 
-            oils_list = [str(x).strip().lower() for x in getattr(preferences_service, "OILS", []) or []]
+            cfg = config_store.load_config()
+            total_members = len(cfg.household.members or [])
         except Exception:
-            oils_list = ["olive oil", "avocado oil", "vegetable oil", "canola oil", "coconut oil"]
+            total_members = None
 
-        def normalize_token(s: str) -> str:
-            return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).strip()
-
-        def deal_text(d: Dict[str, Any]) -> str:
-            return f"{d.get('title','')} {d.get('description','')}"
-
-        def find_hits(text: str, candidates: set[str]) -> set[str]:
-            t = normalize_token(text)
-            hits: set[str] = set()
-            for c in candidates:
-                c2 = normalize_token(str(c))
-                if not c2:
-                    continue
-                # simple contains match with word boundaries-ish
-                if f" {c2} " in f" {t} ":
-                    hits.add(c2)
-            return hits
-
-        def find_soft_excluders(text: str) -> List[str]:
-            t = normalize_token(text)
-            excluders: List[str] = []
-            for member_name, items in soft_map.items():
-                for item in (items or []):
-                    it = normalize_token(str(item))
-                    if it and f" {it} " in f" {t} ":
-                        if member_name not in excluders:
-                            excluders.append(str(member_name))
-                            break
-            return excluders
-
-        def is_oil_deal(text: str) -> Optional[str]:
-            t = normalize_token(text)
-            for o in oils_list:
-                ot = normalize_token(o)
-                if ot and f" {ot} " in f" {t} ":
-                    return ot
-=======
-        def normalize_token(s: str) -> str:
-            return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).strip()
-
-        def deal_text(d: Dict[str, Any]) -> str:
-            return f"{d.get('title','')} {d.get('description','')}"
-
-        # ---- pull effective prefs in a robust way ----
-        hard_set = set(normalize_token(x) for x in (getattr(eff, "hard_excludes", None) or []))
-
-        # Soft excludes can come as:
-        # 1) eff.soft_excludes: ingredient -> [members]
-        # 2) eff.soft_excludes_by_member: member -> [ingredients]
-        soft_ingredient_to_members: Dict[str, List[str]] = {}
-        soft_by_member = getattr(eff, "soft_excludes_by_member", None)
-        if isinstance(soft_by_member, dict):
-            # invert member->items into item->members
-            for member_name, items in soft_by_member.items():
-                for item in (items or []):
-                    it = normalize_token(str(item))
-                    if not it:
-                        continue
-                    soft_ingredient_to_members.setdefault(it, [])
-                    if str(member_name) not in soft_ingredient_to_members[it]:
-                        soft_ingredient_to_members[it].append(str(member_name))
-        else:
-            soft_map = getattr(eff, "soft_excludes", None)
-            if isinstance(soft_map, dict):
-                for ingredient, members in soft_map.items():
-                    ing = normalize_token(str(ingredient))
-                    if not ing:
-                        continue
-                    mlst: List[str] = []
-                    if isinstance(members, list):
-                        mlst = [str(x) for x in members if str(x).strip()]
-                    soft_ingredient_to_members[ing] = mlst
-
-        oils_allowed_raw = getattr(eff, "oils_allowed", None) or set()
-        oils_allowed_norm = set(normalize_token(str(x)) for x in oils_allowed_raw if str(x).strip())
-
-        # Determine oils list (fallback to preferences_service.OILS if present)
-        oils_list: List[str] = []
-        try:
-            from Grocery_Sense.services import preferences_service
-
-            oils_list = [str(x).strip().lower() for x in getattr(preferences_service, "OILS", []) or []]
-        except Exception:
-            oils_list = ["olive oil", "avocado oil", "vegetable oil", "canola oil", "coconut oil"]
-
-        oils_list_norm = [normalize_token(o) for o in oils_list if normalize_token(o)]
-
-        def find_hard_hits(text: str) -> set[str]:
-            t = normalize_token(text)
-            hits: set[str] = set()
-            for c in hard_set:
-                if not c:
-                    continue
-                if f" {c} " in f" {t} ":
-                    hits.add(c)
-            return hits
-
-        def find_soft_hits_and_excluders(text: str) -> tuple[List[str], List[str]]:
-            """
-            Returns:
-              (soft_excluders, soft_hit_ingredients)
-            where:
-              soft_excluders = unique member names
-              soft_hit_ingredients = unique ingredients (tokens) that matched
-            """
-            t = normalize_token(text)
-            excluders: List[str] = []
-            hit_ings: List[str] = []
-
-            for ing, members in soft_ingredient_to_members.items():
-                if not ing:
-                    continue
-                if f" {ing} " in f" {t} ":
-                    if ing not in hit_ings:
-                        hit_ings.append(ing)
-                    for m in (members or []):
-                        if m and m not in excluders:
-                            excluders.append(m)
-
-            return excluders, hit_ings
-
-        def oil_hit(text: str) -> Optional[str]:
-            t = normalize_token(text)
-            for o in oils_list_norm:
-                if o and f" {o} " in f" {t} ":
-                    return o
->>>>>>> f6b52b15a93ede3e237609b6fb89fcaa0ad9b391
-            return None
-
-        filtered: List[Dict[str, Any]] = []
-
+        out: List[Dict[str, Any]] = []
         for d in deals:
-            txt = deal_text(d)
-<<<<<<< HEAD
+            item_name = _norm(d.get("item_name", ""))
+            title = _norm(d.get("title", ""))
+            desc = _norm(d.get("description", ""))
 
-            # 1) Hard excludes: remove
-            hard_hits = find_hits(txt, hard_set)
-            if hard_hits:
-                # annotate (even though removed)
-                d["pref_hard_excluded"] = True
-                d["pref_hard_excluded_hits"] = sorted(hard_hits)
+            # We search in a combined text blob (but we keep title+item_name prominent).
+            text = " ".join(x for x in [item_name, title, desc] if x).strip()
+
+            # Build spans for protected phrases in this deal text.
+            prot_spans = _find_spans(text, protected_phrases)
+
+            # 1) HARD EXCLUDES => REMOVE
+            hard_hit = _best_phrase_hit(text, hard_excludes, prot_spans)
+            if hard_hit:
+                # Hard excluded: drop entirely
                 continue
 
-            d["pref_hard_excluded"] = False
+            # 2) OILS FILTER / ANNOTATE
+            oil_hit = None
+            oil_allowed = None
+            if oils_catalog:
+                # Only consider oils if the deal is plausibly an oil item (contains 'oil') OR hits a known oil phrase.
+                maybe_oil_text = f"{item_name} {title}".strip()
+                maybe_oil_spans = _find_spans(maybe_oil_text, oils_catalog)
+                if maybe_oil_spans:
+                    # pick the longest oil phrase hit
+                    maybe_oil_spans.sort(key=lambda t: -(t[1] - t[0]))
+                    oil_hit = maybe_oil_spans[0][2]  # already normalized
+                    try:
+                        oil_allowed = bool(getattr(eff, "is_oil_allowed")(oil_hit))
+                    except Exception:
+                        # fallback: if oils_allowed is missing, treat as allowed
+                        oil_allowed = True
 
-            # 2) Soft excludes: annotate
-            soft_by = find_soft_excluders(txt)
-            d["pref_soft_excluded_by"] = soft_by
-
-            # 3) Oils: filter or annotate
-            oil_hit = is_oil_deal(txt)
-            if oil_hit and oils_allowed:
-                allowed = oil_hit in set(normalize_token(x) for x in oils_allowed)
-                d["pref_oil_allowed"] = bool(allowed)
-                if filter_disallowed_oils and not allowed:
+            if oil_hit and oil_allowed is False:
+                if filter_disallowed_oils:
                     continue
-            elif oil_hit:
-                # oils unrestricted if oils_allowed is empty
-                d["pref_oil_allowed"] = True
-
-            filtered.append(d)
-
-        return filtered
-=======
-
-            # 1) Hard excludes => remove
-            hard_hits = find_hard_hits(txt)
-            if hard_hits:
-                d["pref_hard_excluded"] = True
-                d["pref_hard_excluded_hits"] = sorted(hard_hits)
-                continue
-            d["pref_hard_excluded"] = False
-            d["pref_hard_excluded_hits"] = []
-
-            # 2) Soft excludes => annotate who + ingredient hit(s)
-            excluders, hit_ings = find_soft_hits_and_excluders(txt)
-            d["pref_soft_excluded_by"] = excluders
-            d["pref_soft_excluded_hits"] = hit_ings  # <-- this is what the tooltip uses
-
-            # 3) Oils => filter or annotate
-            oh = oil_hit(txt)
-            if oh:
-                if oils_allowed_norm:
-                    allowed = oh in oils_allowed_norm
-                    d["pref_oil_allowed"] = bool(allowed)
-                    d["pref_oil_hit"] = oh
-                    if filter_disallowed_oils and not allowed:
-                        continue
-                else:
-                    # oils unrestricted if oils_allowed is empty
-                    d["pref_oil_allowed"] = True
-                    d["pref_oil_hit"] = oh
+                d["pref_oil_allowed"] = False
+                d["pref_oil_hit"] = oil_hit
             else:
-                d["pref_oil_allowed"] = True
-                d["pref_oil_hit"] = ""
+                d["pref_oil_allowed"] = None
+                d["pref_oil_hit"] = None
 
-            filtered.append(d)
+            # 3) SOFT EXCLUDES => KEEP, DE-RANK + ANNOTATE
+            soft_hit = _best_phrase_hit(text, soft_phrases, prot_spans)
+            if soft_hit:
+                ph, span = soft_hit
+                excluders_all = soft_map.get(ph, []) or []
 
-        return filtered
+                # Best-effort to separate secondary vs master names.
+                excluders_secondary = excluders_all
+                try:
+                    from Grocery_Sense import config_store
 
->>>>>>> f6b52b15a93ede3e237609b6fb89fcaa0ad9b391
+                    master = next((m for m in config_store.list_members() if m.role == config_store.ROLE_MASTER), None)
+                    if master:
+                        excluders_secondary = [n for n in excluders_all if _norm(n) != _norm(master.name)]
+                except Exception:
+                    pass
+
+                d["pref_soft_excluded"] = True
+                d["pref_soft_excluders_all"] = excluders_all
+                d["pref_soft_excluders_secondary"] = excluders_secondary
+                d["pref_hit"] = ph
+                d["pref_hit_text"] = _extract_text_window(text, span)
+
+                cnt = len(set(_norm(x) for x in excluders_all if _norm(x)))
+                d["pref_soft_strength_count"] = cnt
+
+                label = "Soft excluded"
+                if total_members and total_members > 0:
+                    # Example rule: 3/5 -> strong soft exclude
+                    if cnt >= max(3, int(round(0.6 * total_members))):
+                        label = "Strong soft exclude"
+                d["pref_soft_strength_label"] = label
+            else:
+                d["pref_soft_excluded"] = False
+                d["pref_soft_excluders_all"] = []
+                d["pref_soft_excluders_secondary"] = []
+                d["pref_hit"] = None
+                d["pref_hit_text"] = None
+                d["pref_soft_strength_count"] = 0
+                d["pref_soft_strength_label"] = None
+
+            # Ranking key for UI sorting:
+            #   - non-soft first
+            #   - then soft excluded (de-ranked)
+            #   - then price
+            pref_rank = 0
+            if d.get("pref_soft_excluded"):
+                pref_rank += 10
+            if d.get("pref_oil_allowed") is False:
+                pref_rank += 6
+
+            d["_pref_rank"] = pref_rank
+            out.append(d)
+
+        out.sort(key=lambda r: (int(r.get("_pref_rank", 0)), float(r.get("price") or 999999)))
+        for r in out:
+            r.pop("_pref_rank", None)
+        return out
