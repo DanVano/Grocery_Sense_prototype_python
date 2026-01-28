@@ -1,276 +1,548 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
-from datetime import date
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from Grocery_Sense.data.repositories import prices_repo
-
-# Preferences are optional. If unavailable (during early prototyping), alerts still work.
-try:
-    from Grocery_Sense.services import preferences_service
-except Exception:  # pragma: no cover
-    preferences_service = None
+from Grocery_Sense import config_store
+from Grocery_Sense.data.repositories import items_repo, prices_repo, stores_repo
 
 
 @dataclass(frozen=True)
-class PriceDropAlert:
-    # Identity
-    alert_type: str  # "DROP_BELOW_USUAL" | "STOCK_UP" | "BOTH"
+class AlertKey:
     item_id: int
-    item_name: str
     store_id: int
-    store_name: str
-
-    # Current quote (from active flyer deal)
-    current_unit_price: float
-    unit: str
-    valid_to: Optional[str] = None
-
-    # Usual price (receipt-first)
-    usual_unit_price: Optional[float] = None
-    usual_source: str = "unknown"  # "receipt" | "estimated" | "unknown"
-    receipt_samples: int = 0
-
-    # 6-month stats
-    low_6mo_store: Optional[float] = None
-    low_6mo_global: Optional[float] = None
-    month_low_store: Optional[float] = None
-
-    # Derived deltas
-    pct_below_usual: Optional[float] = None          # e.g. 0.25 = 25% below usual
-    pct_above_low_6mo: Optional[float] = None        # e.g. 0.03 = 3% above 6mo low (near-low)
-    pct_above_month_low: Optional[float] = None
-
-    # Staple learning
-    staple_purchases_90d: int = 0
-    is_staple: bool = False
-
-    # Preference annotation (soft excludes)
-    soft_excluded_by: Optional[List[str]] = None
-    soft_exclude_hit: Optional[str] = None
-
-    # UI helpers
-    warnings: Optional[List[str]] = None
+    alert_kind: str  # "below_usual" | "stock_up" | "both"
 
 
 class PriceDropAlertService:
     """
     Milestone 2 engine:
-      - "Usual price" learned from receipts (store-specific).
-      - Falls back to other sources if receipt history is sparse.
-      - Generates alerts for active flyer deals only (valid date).
-      - "Stock-up" when near 6-month low AND the item is a staple.
-      - Preference aware (optional): blocks hard-excludes, stars soft-excludes.
+      - Learn "usual price" from receipts (median) with safe fallback when receipt history is sparse.
+      - Compute 6-month low from the full price database.
+      - Identify staples from receipt frequency.
+      - Generate two alert types:
+          A) Dropped X% below usual
+          B) Stock-up suggestion when near a 6-month low (and last time at/under was >= ~30 days ago)
+      - Persist alerts for UI display + dismissal.
     """
 
-    # Thresholds (tune later)
-    DEFAULT_DROP_THRESHOLD = 0.20          # 20% below usual
-    DEFAULT_NEAR_LOW_MARGIN = 0.05         # within 5% of 6mo low
-    DEFAULT_NEAR_MONTH_LOW_MARGIN = 0.02   # within 2% of month low
+    # Tunables (keep conservative; tweak later)
+    DROP_BELOW_USUAL_THRESHOLD_PCT = 15.0     # A)
+    NEAR_SIX_MONTH_LOW_THRESHOLD_PCT = 5.0    # B)
+    ALERT_SUPPRESSION_DAYS = 30               # dismissal suppression window
+    STOCK_UP_COOLDOWN_DAYS = 30               # for "once-a-month low" logic
 
-    DEFAULT_USUAL_WINDOW_DAYS = 180
-    DEFAULT_STAPLE_WINDOW_DAYS = 90
-    DEFAULT_STAPLE_MIN_PURCHASES = 4
+    USUAL_LOOKBACK_DAYS = 180
+    LOW_LOOKBACK_DAYS = 183  # ~6 months
+    STAPLE_LOOKBACK_DAYS = 90
 
-    def __init__(self) -> None:
-        pass
+    MIN_RECEIPT_SAMPLES_FOR_USUAL = 4
 
-    def get_alerts(
-        self,
-        *,
-        limit: int = 250,
-        as_of: Optional[date] = None,
-        drop_threshold: float = DEFAULT_DROP_THRESHOLD,
-        near_low_margin: float = DEFAULT_NEAR_LOW_MARGIN,
-        near_month_low_margin: float = DEFAULT_NEAR_MONTH_LOW_MARGIN,
-        usual_window_days: int = DEFAULT_USUAL_WINDOW_DAYS,
-        staple_window_days: int = DEFAULT_STAPLE_WINDOW_DAYS,
-        staple_min_purchases: int = DEFAULT_STAPLE_MIN_PURCHASES,
-        min_receipt_samples: int = 3,
-    ) -> List[PriceDropAlert]:
+    def __init__(self, *, db_path: Optional[str] = None, log=None) -> None:
+        self._db_path = db_path or config_store.get_db_path()
+        self._log = log
+        self._ensure_tables()
+
+    # ----------------------- public API -----------------------
+
+    def refresh_engine_alerts(self, *, staples_only: bool = True) -> int:
         """
-        Build alerts based on ACTIVE flyer deals (mapped item_id only).
-
-        Notes:
-          - 'usual' is receipt-first; if receipt samples < min_receipt_samples, we estimate.
-          - 'stock-up' requires staple AND near 6mo low (global) or near store low.
+        Rebuild open "engine" alerts based on current price signals + household history.
+        Returns number of alerts inserted.
         """
-        as_of = as_of or date.today()
+        alerts = self.compute_engine_alerts(staples_only=staples_only)
+        return self._persist_engine_alerts(alerts)
 
-        # Active flyer deals (mapped items, valid date)
-        deals = prices_repo.list_active_flyer_deal_quotes(as_of=as_of)
+    def compute_engine_alerts(self, *, staples_only: bool = True) -> List[Dict[str, Any]]:
+        """
+        Compute alerts without writing to DB (useful for embedding in other UIs).
+        """
+        stores = stores_repo.list_stores()
+        if not stores:
+            return []
 
-        # Optional: preference engine
-        effective = None
-        if preferences_service is not None:
-            try:
-                effective = preferences_service.compute_effective_preferences()
-            except Exception:
-                effective = None
+        staple_rows = prices_repo.list_staple_item_ids(
+            since_days=self.STAPLE_LOOKBACK_DAYS,
+            min_distinct_receipts=3,
+            min_line_items=4,
+        )
+        staple_item_ids: Dict[int, Tuple[int, int]] = {
+            item_id: (line_count, receipt_count) for item_id, line_count, receipt_count in staple_rows
+        }
 
-        alerts: List[PriceDropAlert] = []
+        if staples_only and not staple_item_ids:
+            return []
 
-        for d in deals:
-            item_id = d.get("item_id")
-            store_id = d.get("store_id")
-            if item_id is None or store_id is None:
+        # For now: staple-driven scope (keeps alerts high signal)
+        item_ids = list(staple_item_ids.keys())
+
+        out: List[Dict[str, Any]] = []
+
+        for item_id in item_ids:
+            item = items_repo.get_item_by_id(item_id)
+            if not item:
                 continue
 
-            try:
-                item_id_i = int(item_id)
-                store_id_i = int(store_id)
-            except Exception:
-                continue
+            # Find the best "current" quote (lowest across stores)
+            best_store_id: Optional[int] = None
+            best_store_name: str = ""
+            best_unit: Optional[float] = None
+            best_source: str = "unknown"
 
-            item_name = str(d.get("item_name") or "").strip() or "Unknown item"
-            store_name = str(d.get("store_name") or "").strip() or "Unknown store"
+            for s in stores:
+                q = prices_repo.get_best_current_quote_for_item_store(item_id, s.id)
+                if not q:
+                    continue
+                unit = q.get("unit_price")
+                if unit is None or float(unit) <= 0:
+                    continue
+                if best_unit is None or float(unit) < float(best_unit):
+                    best_unit = float(unit)
+                    best_store_id = int(s.id)
+                    best_store_name = str(s.name)
+                    best_source = str(q.get("source") or "latest")
 
-            # Preference: hard-exclude blocks the alert entirely
-            if effective is not None:
-                try:
-                    if preferences_service.is_hard_excluded(item_name, effective):
-                        continue
-                except Exception:
-                    pass
+            # Fallback: global most recent price (estimate)
+            if best_unit is None:
+                global_latest = prices_repo.get_most_recent_price(item_id)
+                if global_latest and global_latest.unit_price is not None and float(global_latest.unit_price) > 0:
+                    best_unit = float(global_latest.unit_price)
+                    best_store_id = int(global_latest.store_id or 0)
+                    store = stores_repo.get_store_by_id(best_store_id) if best_store_id else None
+                    best_store_name = store.name if store else "Unknown"
+                    best_source = str(global_latest.source or "global_latest")
 
-            try:
-                current = float(d.get("unit_price"))
-            except Exception:
-                continue
+            if best_unit is None or best_unit <= 0:
+                continue  # unknown current, no alert
 
-            unit = str(d.get("unit") or "").strip().lower()
-            valid_to = d.get("valid_to")
-
-            # Usual (receipt-first, store-specific)
-            usual_info = prices_repo.get_usual_unit_price_for_store(
-                item_id_i,
-                store_id_i,
-                days=usual_window_days,
-                as_of=as_of,
-                min_receipt_samples=min_receipt_samples,
-            )
-            usual = usual_info.get("usual_price")
-            usual_source = str(usual_info.get("usual_source") or "unknown")
-            receipt_samples = int(usual_info.get("receipt_samples") or 0)
-
-            # 6-month lows
-            low_store = prices_repo.get_six_month_low_for_store(
-                item_id_i, store_id_i, days=usual_window_days, as_of=as_of
-            )
-            low_global = prices_repo.get_six_month_low_global(
-                item_id_i, days=usual_window_days, as_of=as_of
-            )
-            month_low = prices_repo.get_month_low_for_store(
-                item_id_i, store_id_i, days=30, as_of=as_of
+            # Household "usual" (receipt median preferred)
+            usual_price, usual_samples, basis = prices_repo.get_usual_unit_price(
+                item_id,
+                store_id=None,
+                receipt_only=True,
+                min_samples=self.MIN_RECEIPT_SAMPLES_FOR_USUAL,
+                since_days=self.USUAL_LOOKBACK_DAYS,
             )
 
-            # Staple learning (receipt frequency)
-            staple_count = prices_repo.get_receipt_purchase_count(
-                item_id_i, days=staple_window_days, as_of=as_of
+            # 6-month low (household overall)
+            six_low, six_low_when = prices_repo.get_six_month_low_unit_price(
+                item_id,
+                store_id=None,
+                since_days=self.LOW_LOOKBACK_DAYS,
             )
-            is_staple = staple_count >= int(staple_min_purchases)
-
-            # Trigger logic
-            below_usual = False
-            near_6mo_low = False
-            near_month_low = False
 
             pct_below_usual: Optional[float] = None
-            pct_above_low_6mo: Optional[float] = None
-            pct_above_month_low: Optional[float] = None
+            if usual_price is not None and usual_price > 0:
+                pct_below_usual = ((usual_price - best_unit) / usual_price) * 100.0
 
-            if usual is not None and usual > 0:
-                pct_below_usual = max(0.0, (usual - current) / usual)
-                below_usual = current <= (usual * (1.0 - float(drop_threshold)))
+            pct_above_low: Optional[float] = None
+            if six_low is not None and six_low > 0:
+                pct_above_low = ((best_unit - six_low) / six_low) * 100.0
 
-            # Near-low checks (prefer global, but still compute store)
-            ref_low = None
-            if low_global is not None and low_global > 0:
-                ref_low = low_global
-            elif low_store is not None and low_store > 0:
-                ref_low = low_store
+            # Stock-up: near 6-mo low AND last time at/under was >= cooldown days
+            last_seen_at_or_below: Optional[str] = None
+            stock_up_ok = False
+            if six_low is not None and six_low > 0:
+                near_low = best_unit <= (six_low * (1.0 + self.NEAR_SIX_MONTH_LOW_THRESHOLD_PCT / 100.0))
+                if near_low:
+                    last_seen_at_or_below = prices_repo.get_last_seen_at_or_below(
+                        item_id,
+                        store_id=None,
+                        price_ceiling=best_unit,
+                        since_days=self.LOW_LOOKBACK_DAYS,
+                    )
+                    stock_up_ok = self._passes_stockup_cooldown(last_seen_at_or_below)
 
-            if ref_low is not None and ref_low > 0:
-                pct_above_low_6mo = max(0.0, (current - ref_low) / ref_low)
-                near_6mo_low = current <= (ref_low * (1.0 + float(near_low_margin)))
+            dropped_ok = False
+            if pct_below_usual is not None:
+                dropped_ok = pct_below_usual >= self.DROP_BELOW_USUAL_THRESHOLD_PCT
 
-            if month_low is not None and month_low > 0:
-                pct_above_month_low = max(0.0, (current - month_low) / month_low)
-                near_month_low = current <= (month_low * (1.0 + float(near_month_low_margin)))
-
-            # Decide alert type
-            # - Drop alerts can fire even if not staple (still useful)
-            # - Stock-up requires staple AND near 6mo low (and optionally near month-low)
-            want_stock_up = is_staple and near_6mo_low
-            want_drop = below_usual
-
-            if not want_drop and not want_stock_up:
+            if not dropped_ok and not stock_up_ok:
                 continue
 
-            if want_drop and want_stock_up:
-                alert_type = "BOTH"
-            elif want_stock_up:
-                alert_type = "STOCK_UP"
+            if dropped_ok and stock_up_ok:
+                alert_kind = "both"
+            elif dropped_ok:
+                alert_kind = "below_usual"
             else:
-                alert_type = "DROP_BELOW_USUAL"
+                alert_kind = "stock_up"
 
-            # Soft-exclude annotation (optional)
-            soft_by: Optional[List[str]] = None
-            soft_hit: Optional[str] = None
-            if effective is not None:
-                try:
-                    soft_by = preferences_service.soft_excluded_by_members(item_name, effective)
-                    soft_hit = preferences_service.explain_soft_exclude_hit(item_name, effective)
-                    if soft_by and not isinstance(soft_by, list):
-                        soft_by = list(soft_by)
-                except Exception:
-                    soft_by = None
-                    soft_hit = None
+            line_count, receipt_count = staple_item_ids.get(item_id, (0, 0))
+            is_staple = 1 if (receipt_count >= 3 or line_count >= 4) else 0
 
-            warnings: List[str] = []
-            if usual is None:
-                warnings.append("No usual price history for this item/store.")
-            elif usual_source != "receipt":
-                warnings.append("Usual price estimated (receipt history is sparse).")
-
-            if low_global is None and low_store is None:
-                warnings.append("No 6-month low history for this item.")
-
-            # Score/sort key: prefer bigger savings, then staples
-            # (we keep score internal; window sorts by fields too)
-            alert = PriceDropAlert(
-                alert_type=alert_type,
-                item_id=item_id_i,
-                item_name=item_name,
-                store_id=store_id_i,
-                store_name=store_name,
-                current_unit_price=current,
-                unit=unit,
-                valid_to=valid_to,
-                usual_unit_price=float(usual) if usual is not None else None,
-                usual_source=usual_source,
-                receipt_samples=receipt_samples,
-                low_6mo_store=low_store,
-                low_6mo_global=low_global,
-                month_low_store=month_low,
-                pct_below_usual=pct_below_usual,
-                pct_above_low_6mo=pct_above_low_6mo,
-                pct_above_month_low=pct_above_month_low,
-                staple_purchases_90d=int(staple_count),
-                is_staple=is_staple,
-                soft_excluded_by=soft_by,
-                soft_exclude_hit=soft_hit,
-                warnings=warnings or None,
+            notes = self._build_notes(
+                item_name=str(item.name),
+                store_name=best_store_name,
+                current=best_unit,
+                usual=usual_price,
+                pct_below=pct_below_usual,
+                low=six_low,
+                pct_over_low=pct_above_low,
+                kind=alert_kind,
+                basis=basis,
+                samples=usual_samples,
+                last_seen=last_seen_at_or_below,
+                low_when=six_low_when,
             )
-            alerts.append(alert)
 
-        # Sort: biggest % below usual first, then stock-up, then staples, then price
-        def _sort_key(a: PriceDropAlert) -> tuple:
-            pct = a.pct_below_usual if a.pct_below_usual is not None else 0.0
-            stock = 1 if a.alert_type in ("STOCK_UP", "BOTH") else 0
-            staple = 1 if a.is_staple else 0
-            return (-pct, -stock, -staple, a.current_unit_price)
+            out.append(
+                {
+                    "item_id": int(item_id),
+                    "item_name": str(item.name),
+                    "store_id": int(best_store_id or 0),
+                    "store_name": best_store_name,
+                    "current_price": float(best_unit),
+                    "usual_price": float(usual_price) if usual_price is not None else None,
+                    "pct_below_usual": float(pct_below_usual) if pct_below_usual is not None else None,
+                    "six_month_low": float(six_low) if six_low is not None else None,
+                    "pct_above_low": float(pct_above_low) if pct_above_low is not None else None,
+                    "alert_kind": alert_kind,
+                    "is_staple": int(is_staple),
+                    "receipt_samples": int(usual_samples),
+                    "basis": basis,
+                    "source": best_source,
+                    "last_seen_at_or_below": last_seen_at_or_below,
+                    "notes": notes,
+                }
+            )
 
-        alerts.sort(key=_sort_key)
-        return alerts[: int(limit)]
+        # Sort: strongest savings first (below-usual), then near-low
+        def _sort_key(a: Dict[str, Any]) -> Tuple[float, float]:
+            below = a.get("pct_below_usual")
+            above_low = a.get("pct_above_low")
+            below = float(below) if below is not None else -1.0
+            above_low = float(above_low) if above_low is not None else 9999.0
+            return (-below, above_low)
+
+        out.sort(key=_sort_key)
+        return out
+
+    def get_open_alerts(self) -> List[Dict[str, Any]]:
+        self._ensure_tables()
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM price_drop_alerts
+                WHERE status = 'open'
+                ORDER BY created_at DESC
+                """,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def dismiss_alert(self, alert_id: int) -> None:
+        self._ensure_tables()
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                """
+                UPDATE price_drop_alerts
+                SET status = 'dismissed', dismissed_at = datetime('now')
+                WHERE id = ?
+                """,
+                (int(alert_id),),
+            )
+            conn.commit()
+
+    def scan_recent_receipts(self, *, days: int = 21) -> int:
+        """
+        Optional helper:
+          - Looks at receipt price lines (source='receipt') in the last N days
+          - Compares to receipt median usual and creates open alerts when the paid price is far below usual.
+
+        Returns number of alerts inserted.
+        """
+        self._ensure_tables()
+        since = (datetime.now() - timedelta(days=int(max(1, days)))).strftime("%Y-%m-%d")
+
+        inserted = 0
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+
+            rows = conn.execute(
+                """
+                SELECT p.item_id, p.store_id, p.unit_price AS paid_unit, COALESCE(p.date, p.created_at) AS when_iso
+                FROM prices p
+                WHERE (p.source = 'receipt' OR p.receipt_id IS NOT NULL)
+                  AND p.item_id IS NOT NULL
+                  AND p.unit_price IS NOT NULL
+                  AND date(COALESCE(p.date, p.created_at)) >= date(?)
+                ORDER BY when_iso DESC
+                """,
+                (since,),
+            ).fetchall()
+
+            dismissed_keys = self._load_recent_dismissed_keys(conn)
+
+            for r in rows:
+                item_id = int(r["item_id"])
+                store_id = int(r["store_id"] or 0)
+                paid = float(r["paid_unit"])
+                if paid <= 0:
+                    continue
+
+                item = items_repo.get_item_by_id(item_id)
+                if not item:
+                    continue
+
+                store = stores_repo.get_store_by_id(store_id) if store_id else None
+                store_name = store.name if store else "Unknown"
+
+                usual, samples, basis = prices_repo.get_usual_unit_price(
+                    item_id,
+                    receipt_only=True,
+                    min_samples=self.MIN_RECEIPT_SAMPLES_FOR_USUAL,
+                    since_days=self.USUAL_LOOKBACK_DAYS,
+                )
+                if usual is None or usual <= 0:
+                    continue
+
+                pct_below = ((usual - paid) / usual) * 100.0
+                if pct_below < self.DROP_BELOW_USUAL_THRESHOLD_PCT:
+                    continue
+
+                six_low, six_low_when = prices_repo.get_six_month_low_unit_price(
+                    item_id,
+                    since_days=self.LOW_LOOKBACK_DAYS,
+                )
+                pct_above_low = ((paid - six_low) / six_low) * 100.0 if (six_low and six_low > 0) else None
+
+                kind = "below_usual"
+                key = AlertKey(item_id=item_id, store_id=store_id, alert_kind=kind)
+                if key in dismissed_keys:
+                    continue
+
+                notes = self._build_notes(
+                    item_name=str(item.name),
+                    store_name=store_name,
+                    current=paid,
+                    usual=usual,
+                    pct_below=pct_below,
+                    low=six_low,
+                    pct_over_low=pct_above_low,
+                    kind=kind,
+                    basis=basis,
+                    samples=samples,
+                    last_seen=None,
+                    low_when=six_low_when,
+                )
+
+                conn.execute(
+                    """
+                    INSERT INTO price_drop_alerts
+                    (item_id, store_id, store_name, item_name, current_price, usual_price, pct_below_usual,
+                     six_month_low, pct_above_low, alert_kind, is_staple, receipt_samples, basis, source,
+                     last_seen_at_or_below, notes, created_at, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'open')
+                    """,
+                    (
+                        item_id,
+                        store_id,
+                        store_name,
+                        str(item.name),
+                        float(paid),
+                        float(usual),
+                        float(pct_below),
+                        float(six_low) if six_low is not None else None,
+                        float(pct_above_low) if pct_above_low is not None else None,
+                        kind,
+                        0,
+                        int(samples),
+                        basis,
+                        "receipt",
+                        None,
+                        notes,
+                    ),
+                )
+                inserted += 1
+
+            conn.commit()
+
+        return inserted
+
+    # ----------------------- internals -----------------------
+
+    def _ensure_tables(self) -> None:
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS price_drop_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER,
+                    store_id INTEGER,
+                    store_name TEXT,
+                    item_name TEXT,
+                    current_price REAL,
+                    usual_price REAL,
+                    pct_below_usual REAL,
+                    six_month_low REAL,
+                    pct_above_low REAL,
+                    alert_kind TEXT,
+                    is_staple INTEGER DEFAULT 0,
+                    receipt_samples INTEGER DEFAULT 0,
+                    basis TEXT,
+                    source TEXT,
+                    last_seen_at_or_below TEXT,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    status TEXT NOT NULL DEFAULT 'open',
+                    dismissed_at TEXT
+                )
+                """,
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_price_drop_alerts_status ON price_drop_alerts(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_price_drop_alerts_created_at ON price_drop_alerts(created_at)")
+            conn.commit()
+
+            # Lightweight "migration": add missing columns if older table exists
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(price_drop_alerts)").fetchall()}
+            add_cols = {
+                "item_id": "INTEGER",
+                "store_id": "INTEGER",
+                "current_price": "REAL",
+                "pct_below_usual": "REAL",
+                "six_month_low": "REAL",
+                "pct_above_low": "REAL",
+                "alert_kind": "TEXT",
+                "is_staple": "INTEGER DEFAULT 0",
+                "receipt_samples": "INTEGER DEFAULT 0",
+                "basis": "TEXT",
+                "source": "TEXT",
+                "last_seen_at_or_below": "TEXT",
+                "notes": "TEXT",
+            }
+            for name, ctype in add_cols.items():
+                if name not in cols:
+                    try:
+                        conn.execute(f"ALTER TABLE price_drop_alerts ADD COLUMN {name} {ctype}")
+                    except Exception:
+                        pass
+            conn.commit()
+
+    def _persist_engine_alerts(self, alerts: List[Dict[str, Any]]) -> int:
+        self._ensure_tables()
+
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            dismissed_keys = self._load_recent_dismissed_keys(conn)
+
+            # Replace open engine alerts
+            conn.execute("DELETE FROM price_drop_alerts WHERE status='open' AND source='engine'")
+
+            inserted = 0
+            for a in alerts:
+                key = AlertKey(item_id=int(a["item_id"]), store_id=int(a["store_id"]), alert_kind=str(a["alert_kind"]))
+                if key in dismissed_keys:
+                    continue
+
+                conn.execute(
+                    """
+                    INSERT INTO price_drop_alerts
+                    (item_id, store_id, store_name, item_name, current_price, usual_price, pct_below_usual,
+                     six_month_low, pct_above_low, alert_kind, is_staple, receipt_samples, basis, source,
+                     last_seen_at_or_below, notes, created_at, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'open')
+                    """,
+                    (
+                        int(a["item_id"]),
+                        int(a["store_id"]),
+                        str(a.get("store_name") or "Unknown"),
+                        str(a.get("item_name") or ""),
+                        float(a["current_price"]),
+                        float(a["usual_price"]) if a.get("usual_price") is not None else None,
+                        float(a["pct_below_usual"]) if a.get("pct_below_usual") is not None else None,
+                        float(a["six_month_low"]) if a.get("six_month_low") is not None else None,
+                        float(a["pct_above_low"]) if a.get("pct_above_low") is not None else None,
+                        str(a.get("alert_kind") or ""),
+                        int(a.get("is_staple") or 0),
+                        int(a.get("receipt_samples") or 0),
+                        str(a.get("basis") or ""),
+                        "engine",
+                        a.get("last_seen_at_or_below"),
+                        a.get("notes"),
+                    ),
+                )
+                inserted += 1
+
+            conn.commit()
+            return inserted
+
+    def _load_recent_dismissed_keys(self, conn: sqlite3.Connection) -> Set[AlertKey]:
+        rows = conn.execute(
+            """
+            SELECT item_id, store_id, alert_kind, dismissed_at
+            FROM price_drop_alerts
+            WHERE status = 'dismissed'
+              AND dismissed_at IS NOT NULL
+              AND date(dismissed_at) >= date('now', ?)
+            """,
+            (f"-{int(self.ALERT_SUPPRESSION_DAYS)} day",),
+        ).fetchall()
+
+        out: Set[AlertKey] = set()
+        for r in rows:
+            try:
+                out.add(AlertKey(int(r[0] or 0), int(r[1] or 0), str(r[2] or "")))
+            except Exception:
+                pass
+        return out
+
+    def _passes_stockup_cooldown(self, last_seen_iso: Optional[str]) -> bool:
+        # If we can't tell, allow (it will still be near-low)
+        if not last_seen_iso:
+            return True
+        try:
+            dt = datetime.fromisoformat(str(last_seen_iso).replace("Z", "+00:00"))
+        except Exception:
+            try:
+                dt = datetime.strptime(str(last_seen_iso)[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return True
+        return (datetime.now() - dt).days >= int(self.STOCK_UP_COOLDOWN_DAYS)
+
+    def _build_notes(
+        self,
+        *,
+        item_name: str,
+        store_name: str,
+        current: float,
+        usual: Optional[float],
+        pct_below: Optional[float],
+        low: Optional[float],
+        pct_over_low: Optional[float],
+        kind: str,
+        basis: str,
+        samples: int,
+        last_seen: Optional[str],
+        low_when: Optional[str],
+    ) -> str:
+        parts: List[str] = []
+        if kind in ("below_usual", "both") and usual is not None and pct_below is not None:
+            parts.append(f"Dropped {pct_below:.0f}% below usual (${current:.2f} vs ${usual:.2f}).")
+        if kind in ("stock_up", "both") and low is not None:
+            if pct_over_low is not None and pct_over_low >= 0:
+                parts.append(f"Near 6-month low (${current:.2f}; low ${low:.2f}, +{pct_over_low:.1f}%).")
+            else:
+                parts.append(f"Near 6-month low (${current:.2f}; low ${low:.2f}).")
+
+        if basis == "receipt_median":
+            parts.append(f"Usual is receipt median (samples: {samples}).")
+        elif basis == "estimated_median":
+            parts.append(f"Usual is estimated median (samples: {samples}).")
+        else:
+            parts.append("Usual price is unknown/insufficient history.")
+
+        if low_when:
+            parts.append(f"6-mo low seen on: {str(low_when)[:10]}.")
+        if last_seen:
+            parts.append(f"Last time at/under this price: {str(last_seen)[:10]}.")
+
+        parts.append(f"Best current store: {store_name}.")
+
+        return " ".join(parts).strip()
+
+
+def get_price_drop_alert_service(*, log=None) -> PriceDropAlertService:
+    return PriceDropAlertService(log=log)

@@ -1,104 +1,48 @@
-"""
-Grocery_Sense.data.repositories.prices_repo
-
-SQLite-backed persistence for PricePoint objects and basic price statistics.
-"""
-
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
+from typing import List, Optional, Tuple, Dict, Any
 
-from Grocery_Sense.data.connection import get_connection
-from Grocery_Sense.domain.models import PricePoint
-
-
-# ---------- Row mapping helpers ----------
-
-def _row_to_price_point(row) -> PricePoint:
-    """
-    Convert a SQLite row tuple into a PricePoint dataclass.
-    Ordering must match the SELECTs below.
-    """
-    (
-        price_id,
-        item_id,
-        store_id,
-        receipt_id,
-        flyer_source_id,
-        source,
-        date,
-        unit_price,
-        unit,
-        quantity,
-        total_price,
-        raw_name,
-        confidence,
-        created_at,
-    ) = row
-
-    return PricePoint(
-        id=price_id,
-        item_id=item_id,
-        store_id=store_id,
-        source=source,
-        date=date,
-        unit_price=unit_price,
-        unit=unit,
-        quantity=quantity,
-        total_price=total_price,
-        receipt_id=receipt_id,
-        flyer_source_id=flyer_source_id,
-        raw_name=raw_name,
-        confidence=confidence,
-    )
+from Grocery_Sense import config_store
+from Grocery_Sense.domain.models import PricePoint, PriceStats
 
 
-# ---------- Insert operations ----------
+def get_connection():
+    return sqlite3.connect(config_store.get_db_path())
+
 
 def add_price_point(
     item_id: int,
     store_id: int,
-    source: str,
-    date: str,
     unit_price: float,
     unit: str,
     quantity: Optional[float] = None,
     total_price: Optional[float] = None,
-    receipt_id: Optional[int] = None,
-    flyer_source_id: Optional[int] = None,
     raw_name: Optional[str] = None,
     confidence: Optional[int] = None,
-) -> PricePoint:
+    source: str = "manual",
+    date: Optional[str] = None,
+    receipt_id: Optional[int] = None,
+    flyer_source_id: Optional[int] = None,
+) -> int:
     """
-    Insert a new price history entry and return the PricePoint.
-
-    `source` should be one of: 'receipt', 'flyer', 'manual'.
-    `date` is 'YYYY-MM-DD'.
-    `unit_price` should be normalized (e.g. per kg).
+    Inserts a new price point into the prices table.
+    Returns inserted row id.
     """
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
 
-    with get_connection() as conn, closing(conn.cursor()) as cur:
+    with closing(get_connection()) as conn:
+        cur = conn.cursor()
         cur.execute(
             """
             INSERT INTO prices (
-                item_id,
-                store_id,
-                receipt_id,
-                flyer_source_id,
-                source,
-                date,
-                unit_price,
-                unit,
-                quantity,
-                total_price,
-                raw_name,
-                confidence,
-                created_at
+                item_id, store_id, receipt_id, flyer_source_id, source, date,
+                unit_price, unit, quantity, total_price, raw_name, confidence
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item_id,
@@ -113,328 +57,129 @@ def add_price_point(
                 total_price,
                 raw_name,
                 confidence,
-                now,
             ),
         )
-        new_id = cur.lastrowid
+        conn.commit()
+        return int(cur.lastrowid)
 
-        cur.execute(
-            """
-            SELECT
-                id,
-                item_id,
-                store_id,
-                receipt_id,
-                flyer_source_id,
-                source,
-                date,
-                unit_price,
-                unit,
-                quantity,
-                total_price,
-                raw_name,
-                confidence,
-                created_at
-            FROM prices
-            WHERE id = ?
-            """,
-            (new_id,),
-        )
-        row = cur.fetchone()
-
-    return _row_to_price_point(row)
-
-
-# ---------- Query helpers ----------
 
 def get_prices_for_item(
     item_id: int,
-    days_back: Optional[int] = None,
     store_id: Optional[int] = None,
-    limit: Optional[int] = None,
+    since_days: int = 365,
 ) -> List[PricePoint]:
     """
-    Fetch price history for a given item.
-
-    - Optionally restrict to a store.
-    - Optionally restrict to the last `days_back` days.
-    - Optionally limit number of records (most recent first).
+    Returns price points for an item, optionally filtered by store.
     """
-    clauses = ["item_id = ?"]
-    params: list = [item_id]
+    cutoff = (datetime.now() - timedelta(days=since_days)).strftime("%Y-%m-%d")
+
+    sql = """
+        SELECT id, item_id, store_id, receipt_id, flyer_source_id, source, date,
+               unit_price, unit, quantity, total_price, raw_name, confidence
+        FROM prices
+        WHERE item_id = ? AND date >= ?
+    """
+    params: List[Any] = [item_id, cutoff]
 
     if store_id is not None:
-        clauses.append("store_id = ?")
+        sql += " AND store_id = ?"
         params.append(store_id)
 
-    if days_back is not None and days_back > 0:
-        cutoff_date = (datetime.utcnow() - timedelta(days=days_back)).date().isoformat()
-        clauses.append("date >= ?")
-        params.append(cutoff_date)
+    sql += " ORDER BY date ASC"
 
-    where_sql = " AND ".join(clauses)
-    limit_sql = f"LIMIT {int(limit)}" if limit is not None else ""
-
-    query = f"""
-        SELECT
-            id,
-            item_id,
-            store_id,
-            receipt_id,
-            flyer_source_id,
-            source,
-            date,
-            unit_price,
-            unit,
-            quantity,
-            total_price,
-            raw_name,
-            confidence,
-            created_at
-        FROM prices
-        WHERE {where_sql}
-        ORDER BY date DESC, id DESC
-        {limit_sql}
-    """
-
-    with get_connection() as conn, closing(conn.cursor()) as cur:
-        cur.execute(query, params)
+    out: List[PricePoint] = []
+    with closing(get_connection()) as conn:
+        cur = conn.execute(sql, params)
         rows = cur.fetchall()
+        for r in rows:
+            out.append(
+                PricePoint(
+                    id=r[0],
+                    item_id=r[1],
+                    store_id=r[2],
+                    receipt_id=r[3],
+                    flyer_source_id=r[4],
+                    source=r[5],
+                    date=r[6],
+                    unit_price=r[7],
+                    unit=r[8],
+                    quantity=r[9],
+                    total_price=r[10],
+                    raw_name=r[11],
+                    confidence=r[12],
+                )
+            )
+    return out
 
-    return [_row_to_price_point(r) for r in rows]
 
-
-def get_most_recent_price(
-    item_id: int,
-    store_id: Optional[int] = None,
-) -> Optional[PricePoint]:
+def get_most_recent_price(item_id: int, store_id: Optional[int] = None) -> Optional[PricePoint]:
     """
-    Get the single most recent price entry for an item, optionally for one store.
+    Returns the most recent price point for item (optionally by store).
     """
-    pts = get_prices_for_item(
+    sql = """
+        SELECT id, item_id, store_id, receipt_id, flyer_source_id, source, date,
+               unit_price, unit, quantity, total_price, raw_name, confidence
+        FROM prices
+        WHERE item_id = ?
+    """
+    params: List[Any] = [item_id]
+
+    if store_id is not None:
+        sql += " AND store_id = ?"
+        params.append(store_id)
+
+    sql += " ORDER BY date DESC, id DESC LIMIT 1"
+
+    with closing(get_connection()) as conn:
+        row = conn.execute(sql, params).fetchone()
+        if not row:
+            return None
+        return PricePoint(
+            id=row[0],
+            item_id=row[1],
+            store_id=row[2],
+            receipt_id=row[3],
+            flyer_source_id=row[4],
+            source=row[5],
+            date=row[6],
+            unit_price=row[7],
+            unit=row[8],
+            quantity=row[9],
+            total_price=row[10],
+            raw_name=row[11],
+            confidence=row[12],
+        )
+
+
+def get_price_stats_for_item(item_id: int, store_id: Optional[int] = None, since_days: int = 365) -> PriceStats:
+    """
+    Returns basic stats for an item's price history.
+    """
+    points = get_prices_for_item(item_id, store_id=store_id, since_days=since_days)
+    if not points:
+        return PriceStats(item_id=item_id, store_id=store_id, min_price=None, max_price=None, avg_price=None, count=0)
+
+    prices = [p.unit_price for p in points if p.unit_price is not None]
+    if not prices:
+        return PriceStats(item_id=item_id, store_id=store_id, min_price=None, max_price=None, avg_price=None, count=0)
+
+    return PriceStats(
         item_id=item_id,
-        days_back=None,
         store_id=store_id,
-        limit=1,
+        min_price=min(prices),
+        max_price=max(prices),
+        avg_price=sum(prices) / len(prices),
+        count=len(prices),
     )
-    return pts[0] if pts else None
 
 
-def get_price_stats_for_item(
-    item_id: int,
-    window_days: int = 180,
-) -> Optional[Tuple[float, float, float, int]]:
-    """
-    Compute basic statistics (avg, min, max, count) for an item over a window.
-
-    Returns:
-        (avg_unit_price, min_unit_price, max_unit_price, sample_count)
-    or None if there are no data points.
-    """
-    cutoff_date = (datetime.utcnow() - timedelta(days=window_days)).date().isoformat()
-
-    with get_connection() as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT
-                AVG(unit_price) AS avg_price,
-                MIN(unit_price) AS min_price,
-                MAX(unit_price) AS max_price,
-                COUNT(*)        AS sample_count
-            FROM prices
-            WHERE item_id = ?
-              AND date >= ?
-            """,
-            (item_id, cutoff_date),
-        )
-        row = cur.fetchone()
-
-    if not row:
-        return None
-
-    avg_price, min_price, max_price, count = row
-    if count == 0 or avg_price is None:
-        return None
-
-    return float(avg_price), float(min_price), float(max_price), int(count)
-
-# ---------------------------------------------------------------------------
-# NEW: Query helpers for price-drop alerts (usual price + 6-month low + staples)
-# ---------------------------------------------------------------------------
-
-from datetime import date, timedelta
-from typing import Any
-
-
-def _date_str_days_ago(days: int, *, as_of: Optional[date] = None) -> str:
-    """Return YYYY-MM-DD for (as_of - days)."""
-    base = as_of or date.today()
-    return (base - timedelta(days=int(days))).isoformat()
-
-
-def list_active_flyer_deal_quotes(*, as_of: Optional[date] = None) -> List[dict]:
-    """Return mapped, active flyer deals with unit pricing.
-
-    This reads from flyer_batches + flyer_deals (created/managed in flyers_repo.py).
-
-    Output keys (best-effort):
-      - deal_id, batch_id
-      - store_id, store_name
-      - item_id, item_name
-      - unit_price, unit
-      - valid_from, valid_to
-      - raw_title
-    """
-    as_of = as_of or date.today()
-    with closing(get_connection()) as con:
-        cur = con.cursor()
-        cur.execute(
-            """
-            SELECT
-                d.id                 AS deal_id,
-                d.batch_id           AS batch_id,
-                d.store_id           AS store_id,
-                COALESCE(s.name, '') AS store_name,
-                d.item_id            AS item_id,
-                COALESCE(i.canonical_name, d.raw_title, '') AS item_name,
-                COALESCE(d.norm_unit_price, d.unit_price)   AS unit_price,
-                COALESCE(d.norm_unit, d.unit, '')           AS unit,
-                b.valid_from         AS valid_from,
-                b.valid_to           AS valid_to,
-                d.raw_title          AS raw_title
-            FROM flyer_deals d
-            JOIN flyer_batches b ON b.id = d.batch_id
-            LEFT JOIN items i    ON i.id = d.item_id
-            LEFT JOIN stores s   ON s.id = d.store_id
-            WHERE d.item_id IS NOT NULL
-              AND COALESCE(d.norm_unit_price, d.unit_price) IS NOT NULL
-              AND date(?) >= date(b.valid_from)
-              AND date(?) <= date(COALESCE(b.valid_to, b.valid_from))
-            ORDER BY d.store_id, i.canonical_name
-            """,
-            (as_of.isoformat(), as_of.isoformat()),
-        )
-        rows = cur.fetchall() or []
-
-    out: List[dict] = []
-    for r in rows:
-        try:
-            (
-                deal_id,
-                batch_id,
-                store_id,
-                store_name,
-                item_id,
-                item_name,
-                unit_price,
-                unit,
-                valid_from,
-                valid_to,
-                raw_title,
-            ) = r
-        except Exception:
-            continue
-
-        try:
-            unit_price_f = float(unit_price)
-        except Exception:
-            continue
-
-        out.append(
-            {
-                "deal_id": int(deal_id),
-                "batch_id": int(batch_id),
-                "store_id": int(store_id) if store_id is not None else None,
-                "store_name": str(store_name or ""),
-                "item_id": int(item_id) if item_id is not None else None,
-                "item_name": str(item_name or raw_title or "").strip(),
-                "unit_price": unit_price_f,
-                "unit": str(unit or "").strip().lower(),
-                "valid_from": valid_from,
-                "valid_to": valid_to,
-                "raw_title": str(raw_title or ""),
-            }
-        )
-    return out
-
-
-def get_receipt_unit_price_samples(
-    item_id: int,
-    store_id: int,
-    *,
-    days: int = 180,
-    as_of: Optional[date] = None,
-    limit: int = 2000,
-) -> List[float]:
-    """Fetch recent receipt unit_price samples for (item, store)."""
-    since = _date_str_days_ago(days, as_of=as_of)
-    with closing(get_connection()) as con:
-        cur = con.cursor()
-        cur.execute(
-            """
-            SELECT unit_price
-            FROM prices
-            WHERE item_id = ?
-              AND store_id = ?
-              AND source = 'receipt'
-              AND unit_price IS NOT NULL
-              AND date(date) >= date(?)
-            ORDER BY date(date) DESC
-            LIMIT ?
-            """,
-            (int(item_id), int(store_id), since, int(limit)),
-        )
-        rows = cur.fetchall() or []
-
-    out: List[float] = []
-    for (p,) in rows:
-        try:
-            out.append(float(p))
-        except Exception:
-            continue
-    return out
-
-
-def get_any_source_unit_price_samples(
-    item_id: int,
-    store_id: int,
-    *,
-    days: int = 180,
-    as_of: Optional[date] = None,
-    limit: int = 2000,
-) -> List[float]:
-    """Fetch recent unit_price samples for (item, store) across ANY source."""
-    since = _date_str_days_ago(days, as_of=as_of)
-    with closing(get_connection()) as con:
-        cur = con.cursor()
-        cur.execute(
-            """
-            SELECT unit_price
-            FROM prices
-            WHERE item_id = ?
-              AND store_id = ?
-              AND unit_price IS NOT NULL
-              AND date(date) >= date(?)
-            ORDER BY date(date) DESC
-            LIMIT ?
-            """,
-            (int(item_id), int(store_id), since, int(limit)),
-        )
-        rows = cur.fetchall() or []
-
-    out: List[float] = []
-    for (p,) in rows:
-        try:
-            out.append(float(p))
-        except Exception:
-            continue
-    return out
-
+# ---------- Advanced query helpers (Milestone 2: usual price + 6-mo low + staples) ----------
 
 def _median(values: List[float]) -> Optional[float]:
+    """Return the median of a list of floats (None if empty)."""
     if not values:
         return None
-    vals = sorted([v for v in values if v is not None])
+    vals = sorted(v for v in values if v is not None)
     if not vals:
         return None
     n = len(vals)
@@ -444,188 +189,261 @@ def _median(values: List[float]) -> Optional[float]:
     return float((vals[mid - 1] + vals[mid]) / 2.0)
 
 
-def get_usual_unit_price_for_store(
-    item_id: int,
-    store_id: int,
-    *,
-    days: int = 180,
-    as_of: Optional[date] = None,
-    min_receipt_samples: int = 3,
-) -> dict:
-    """Compute "usual" price primarily from receipts, with optional fallback.
-
-    Returns dict:
-      - usual_price: Optional[float]
-      - usual_source: 'receipt' | 'estimated' | 'unknown'
-      - receipt_samples: int
-      - estimated_samples: int
-    """
-    receipt_samples = get_receipt_unit_price_samples(item_id, store_id, days=days, as_of=as_of)
-    receipt_med = _median(receipt_samples)
-
-    if receipt_med is not None and len(receipt_samples) >= int(min_receipt_samples):
-        return {
-            "usual_price": float(receipt_med),
-            "usual_source": "receipt",
-            "receipt_samples": int(len(receipt_samples)),
-            "estimated_samples": 0,
-        }
-
-    # Fallback: use any-source recent history if receipts are sparse.
-    any_samples = get_any_source_unit_price_samples(item_id, store_id, days=days, as_of=as_of)
-    any_med = _median(any_samples)
-
-    if any_med is not None and len(any_samples) > 0:
-        return {
-            "usual_price": float(any_med),
-            "usual_source": "estimated",
-            "receipt_samples": int(len(receipt_samples)),
-            "estimated_samples": int(len(any_samples)),
-        }
-
-    return {
-        "usual_price": None,
-        "usual_source": "unknown",
-        "receipt_samples": int(len(receipt_samples)),
-        "estimated_samples": 0,
-    }
+def _since_clause(days: int) -> str:
+    # SQLite date modifier like '-180 day'
+    days = int(max(1, days))
+    return f"-{days} day"
 
 
-def get_six_month_low_for_store(
-    item_id: int,
-    store_id: int,
-    *,
-    days: int = 180,
-    as_of: Optional[date] = None,
-) -> Optional[float]:
-    """Return the lowest unit_price recorded in the last N days for this store."""
-    since = _date_str_days_ago(days, as_of=as_of)
-    with closing(get_connection()) as con:
-        cur = con.cursor()
-        cur.execute(
-            """
-            SELECT MIN(unit_price)
-            FROM prices
-            WHERE item_id = ?
-              AND store_id = ?
-              AND unit_price IS NOT NULL
-              AND date(date) >= date(?)
-            """,
-            (int(item_id), int(store_id), since),
-        )
-        row = cur.fetchone()
-
-    if not row:
-        return None
-    try:
-        return float(row[0]) if row[0] is not None else None
-    except Exception:
-        return None
-
-
-def get_six_month_low_global(
+def list_unit_prices(
     item_id: int,
     *,
-    days: int = 180,
-    as_of: Optional[date] = None,
-) -> Optional[float]:
-    """Return the lowest unit_price recorded in the last N days across ALL stores."""
-    since = _date_str_days_ago(days, as_of=as_of)
-    with closing(get_connection()) as con:
-        cur = con.cursor()
-        cur.execute(
-            """
-            SELECT MIN(unit_price)
-            FROM prices
-            WHERE item_id = ?
-              AND unit_price IS NOT NULL
-              AND date(date) >= date(?)
-            """,
-            (int(item_id), since),
-        )
-        row = cur.fetchone()
-
-    if not row:
-        return None
-    try:
-        return float(row[0]) if row[0] is not None else None
-    except Exception:
-        return None
-
-
-def get_month_low_for_store(
-    item_id: int,
-    store_id: int,
-    *,
-    days: int = 30,
-    as_of: Optional[date] = None,
-) -> Optional[float]:
-    """Return the lowest unit_price recorded in the last ~month for this store."""
-    since = _date_str_days_ago(days, as_of=as_of)
-    with closing(get_connection()) as con:
-        cur = con.cursor()
-        cur.execute(
-            """
-            SELECT MIN(unit_price)
-            FROM prices
-            WHERE item_id = ?
-              AND store_id = ?
-              AND unit_price IS NOT NULL
-              AND date(date) >= date(?)
-            """,
-            (int(item_id), int(store_id), since),
-        )
-        row = cur.fetchone()
-
-    if not row:
-        return None
-    try:
-        return float(row[0]) if row[0] is not None else None
-    except Exception:
-        return None
-
-
-def get_receipt_purchase_count(
-    item_id: int,
-    *,
-    days: int = 90,
-    as_of: Optional[date] = None,
     store_id: Optional[int] = None,
-) -> int:
-    """How often this item appears on receipts (approx) over the last N days.
+    since_days: int = 180,
+    sources: Optional[List[str]] = None,
+    receipt_only: bool = False,
+    limit: Optional[int] = None,
+) -> List[float]:
+    """Return unit_price history for an item.
 
-    Uses COUNT(DISTINCT receipt_id) when possible; falls back to COUNT(*) if
-    receipt_id is missing.
+    Notes:
+      - Uses COALESCE(date, created_at) for time filtering.
+      - If receipt_only=True, filters to rows that look like receipt line-items.
     """
-    since = _date_str_days_ago(days, as_of=as_of)
+    sql = [
+        "SELECT unit_price",
+        "FROM prices",
+        "WHERE item_id = ?",
+        "  AND unit_price IS NOT NULL",
+        "  AND date(COALESCE(date, created_at)) >= date('now', ?)",
+    ]
+    params: List[Any] = [int(item_id), _since_clause(since_days)]
 
-    where_store = "" if store_id is None else " AND store_id = ? "
-    params: List[Any] = [int(item_id), since]
     if store_id is not None:
+        sql.append("  AND store_id = ?")
         params.append(int(store_id))
 
-    with closing(get_connection()) as con:
-        cur = con.cursor()
-        cur.execute(
-            f"""
-            SELECT
-                CASE
-                    WHEN SUM(CASE WHEN receipt_id IS NOT NULL THEN 1 ELSE 0 END) > 0
-                    THEN COUNT(DISTINCT receipt_id)
-                    ELSE COUNT(*)
-                END AS purchase_count
-            FROM prices
-            WHERE item_id = ?
-              AND source = 'receipt'
-              AND unit_price IS NOT NULL
-              AND date(date) >= date(?)
-              {where_store}
-            """,
-            tuple(params),
-        )
-        row = cur.fetchone()
+    if receipt_only:
+        sql.append("  AND (source = 'receipt' OR receipt_id IS NOT NULL)")
+    elif sources:
+        placeholders = ",".join(["?"] * len(sources))
+        sql.append(f"  AND source IN ({placeholders})")
+        params.extend([str(s) for s in sources])
 
-    try:
-        return int(row[0] or 0) if row else 0
-    except Exception:
-        return 0
+    sql.append("ORDER BY COALESCE(date, created_at) DESC")
+    if limit:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+
+    with closing(get_connection()) as conn:
+        cur = conn.execute("\n".join(sql), params)
+        return [float(r[0]) for r in cur.fetchall() if r and r[0] is not None]
+
+
+def get_usual_unit_price(
+    item_id: int,
+    *,
+    store_id: Optional[int] = None,
+    receipt_only: bool = True,
+    min_samples: int = 4,
+    since_days: int = 180,
+) -> Tuple[Optional[float], int, str]:
+    """Compute a 'usual' unit price.
+
+    Returns: (usual_price, sample_count, basis)
+      basis: 'receipt_median' | 'estimated_median' | 'unknown'
+    """
+    prices = list_unit_prices(
+        item_id,
+        store_id=store_id,
+        since_days=since_days,
+        receipt_only=receipt_only,
+    )
+    if len(prices) >= int(min_samples):
+        med = _median(prices)
+        return (med, len(prices), "receipt_median" if receipt_only else "estimated_median")
+
+    if receipt_only:
+        fallback = list_unit_prices(
+            item_id,
+            store_id=store_id,
+            since_days=since_days,
+            receipt_only=False,
+        )
+        if fallback:
+            return (_median(fallback), len(fallback), "estimated_median")
+
+    return (None, len(prices), "unknown")
+
+
+def get_six_month_low_unit_price(
+    item_id: int,
+    *,
+    store_id: Optional[int] = None,
+    since_days: int = 183,
+) -> Tuple[Optional[float], Optional[str]]:
+    """Return (lowest_unit_price, when_iso) within the lookback window."""
+    sql = [
+        "SELECT unit_price, COALESCE(date, created_at) AS when_iso",
+        "FROM prices",
+        "WHERE item_id = ?",
+        "  AND unit_price IS NOT NULL",
+        "  AND date(COALESCE(date, created_at)) >= date('now', ?)",
+    ]
+    params: List[Any] = [int(item_id), _since_clause(since_days)]
+
+    if store_id is not None:
+        sql.append("  AND store_id = ?")
+        params.append(int(store_id))
+
+    sql.append("ORDER BY unit_price ASC, when_iso ASC")
+    sql.append("LIMIT 1")
+
+    with closing(get_connection()) as conn:
+        cur = conn.execute("\n".join(sql), params)
+        row = cur.fetchone()
+        if not row:
+            return (None, None)
+        return (float(row[0]), str(row[1]) if row[1] else None)
+
+
+def get_last_seen_at_or_below(
+    item_id: int,
+    *,
+    store_id: Optional[int] = None,
+    price_ceiling: float,
+    since_days: int = 183,
+) -> Optional[str]:
+    """Most recent date we saw unit_price <= price_ceiling (within lookback)."""
+    sql = [
+        "SELECT COALESCE(date, created_at) AS when_iso",
+        "FROM prices",
+        "WHERE item_id = ?",
+        "  AND unit_price IS NOT NULL",
+        "  AND unit_price <= ?",
+        "  AND date(COALESCE(date, created_at)) >= date('now', ?)",
+    ]
+    params: List[Any] = [int(item_id), float(price_ceiling), _since_clause(since_days)]
+    if store_id is not None:
+        sql.append("  AND store_id = ?")
+        params.append(int(store_id))
+    sql.append("ORDER BY when_iso DESC")
+    sql.append("LIMIT 1")
+
+    with closing(get_connection()) as conn:
+        cur = conn.execute("\n".join(sql), params)
+        row = cur.fetchone()
+        return str(row[0]) if row and row[0] else None
+
+
+def get_active_flyer_unit_price(
+    item_id: int,
+    store_id: int,
+) -> Optional[float]:
+    """Return the active flyer unit price if we can resolve it.
+
+    Priority:
+      1) Join with flyer_sources when present.
+      2) Fallback: any 'flyer' price recorded in the last ~3 weeks.
+    """
+    with closing(get_connection()) as conn:
+        cur = conn.cursor()
+
+        # 1) Try flyer_sources join (table/column may not exist in early prototypes)
+        try:
+            cur.execute(
+                """
+                SELECT p.unit_price
+                FROM prices p
+                JOIN flyer_sources fs ON fs.id = p.flyer_source_id
+                WHERE p.item_id = ?
+                  AND p.store_id = ?
+                  AND p.unit_price IS NOT NULL
+                  AND p.source = 'flyer'
+                  AND date(fs.valid_from) <= date('now')
+                  AND date(fs.valid_to) >= date('now')
+                ORDER BY p.unit_price ASC
+                LIMIT 1
+                """,
+                (int(item_id), int(store_id)),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+        except Exception:
+            pass
+
+        # 2) Fallback: recent flyer rows
+        try:
+            cur.execute(
+                """
+                SELECT unit_price
+                FROM prices
+                WHERE item_id = ?
+                  AND store_id = ?
+                  AND unit_price IS NOT NULL
+                  AND source = 'flyer'
+                  AND date(COALESCE(date, created_at)) >= date('now', '-21 day')
+                ORDER BY unit_price ASC
+                LIMIT 1
+                """,
+                (int(item_id), int(store_id)),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+        except Exception:
+            pass
+
+    return None
+
+
+def list_staple_item_ids(
+    *,
+    since_days: int = 90,
+    min_distinct_receipts: int = 3,
+    min_line_items: int = 4,
+) -> List[Tuple[int, int, int]]:
+    """Return likely staple items based on receipt history.
+
+    Returns list of tuples:
+      (item_id, line_count, distinct_receipt_count)
+    """
+    sql = """
+    SELECT
+        item_id,
+        COUNT(*) AS line_count,
+        COUNT(DISTINCT receipt_id) AS receipt_count
+    FROM prices
+    WHERE item_id IS NOT NULL
+      AND unit_price IS NOT NULL
+      AND (source = 'receipt' OR receipt_id IS NOT NULL)
+      AND date(COALESCE(date, created_at)) >= date('now', ?)
+    GROUP BY item_id
+    HAVING line_count >= ? OR receipt_count >= ?
+    ORDER BY receipt_count DESC, line_count DESC
+    """
+
+    with closing(get_connection()) as conn:
+        cur = conn.execute(sql, (_since_clause(since_days), int(min_line_items), int(min_distinct_receipts)))
+        return [(int(r[0]), int(r[1]), int(r[2])) for r in cur.fetchall()]
+
+
+def get_best_current_quote_for_item_store(
+    item_id: int,
+    store_id: int,
+) -> Optional[Dict[str, Any]]:
+    """Best-effort current quote for an item/store.
+
+    Preference order:
+      flyer (active) -> most recent store price (any source)
+    """
+    flyer = get_active_flyer_unit_price(item_id, store_id)
+    if flyer is not None:
+        return {"unit_price": float(flyer), "source": "flyer"}
+
+    latest = get_most_recent_price(item_id, store_id=store_id)
+    if latest and latest.unit_price is not None:
+        return {"unit_price": float(latest.unit_price), "source": latest.source or "latest"}
+
+    return None
