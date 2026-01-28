@@ -7,13 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-# Connection import is inconsistent across older parts of the codebase.
-# Prefer Grocery_Sense.data.connection, but fall back to Grocery_Sense.data.db.
-try:
-    from Grocery_Sense.data.connection import get_connection  # type: ignore
-except Exception:  # pragma: no cover
-    from Grocery_Sense.data.db import get_connection  # type: ignore
-
+from Grocery_Sense.data.connection import get_connection
 
 # -----------------------------------------------------------------------------
 # Helpers: hashing (used by ingest), phrase-safe matching (used by preferences)
@@ -910,3 +904,4 @@ class FlyersRepo:
             r.pop("_pref_rank", None)
 
         return out
+
