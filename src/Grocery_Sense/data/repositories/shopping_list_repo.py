@@ -1,218 +1,206 @@
-"""
-Grocery_Sense.data.repositories.shopping_list_repo
-
-SQLite-backed persistence for ShoppingListItem objects.
-"""
-
 from __future__ import annotations
 
-from typing import List, Optional
-from contextlib import closing
-from datetime import datetime
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
-from Grocery_Sense.data.connection import get_connection
-from Grocery_Sense.domain.models import ShoppingListItem
+from Grocery_Sense.data.db import get_connection
 
 
-# ---------- Row mapping helpers ----------
+@dataclass
+class ShoppingListRow:
+    id: int
+    display_name: str
+    quantity: float
+    unit: str
+    category: str
+    is_checked_off: bool
+    notes: str
+    added_by_member_id: Optional[int]
+    is_active: bool
+    planned_store_id: Optional[int]
 
-def _row_to_shopping_item(row) -> ShoppingListItem:
-    """
-    Convert a SQLite row tuple into a ShoppingListItem dataclass.
-    Ordering must match the SELECTs below.
-    """
-    (
-        item_id,
-        display_name,
-        quantity,
-        unit,
-        item_ref_id,
-        planned_store_id,
-        added_by,
-        added_at,
-        is_checked_off,
-        is_active,
-        notes,
-    ) = row
 
-    return ShoppingListItem(
-        id=item_id,
-        display_name=display_name,
-        quantity=quantity,
-        unit=unit,
-        item_id=item_ref_id,
-        planned_store_id=planned_store_id,
-        added_by=added_by,
-        added_at=added_at,
-        is_checked_off=bool(is_checked_off),
-        is_active=bool(is_active),
-        notes=notes,
+def _row_to_obj(row) -> ShoppingListRow:
+    return ShoppingListRow(
+        id=int(row["id"]),
+        display_name=str(row["display_name"] or ""),
+        quantity=float(row["quantity"] or 1.0),
+        unit=str(row["unit"] or ""),
+        category=str(row["category"] or ""),
+        is_checked_off=bool(row["is_checked_off"] or 0),
+        notes=str(row["notes"] or ""),
+        added_by_member_id=int(row["added_by_member_id"]) if row["added_by_member_id"] is not None else None,
+        is_active=bool(row["is_active"] or 0),
+        planned_store_id=int(row["planned_store_id"]) if row["planned_store_id"] is not None else None,
     )
 
 
-# ---------- CRUD operations ----------
+def list_active_items(*, store_id: Optional[int] = None) -> List[ShoppingListRow]:
+    """
+    Active + not deleted + not checked off items.
+
+    If store_id is provided, filters by planned_store_id == store_id.
+    """
+    with get_connection() as conn:
+        if store_id is None:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    display_name,
+                    quantity,
+                    unit,
+                    category,
+                    is_checked_off,
+                    notes,
+                    added_by_member_id,
+                    is_active,
+                    planned_store_id
+                FROM shopping_list
+                WHERE is_active = 1 AND is_deleted = 0 AND is_checked_off = 0
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    display_name,
+                    quantity,
+                    unit,
+                    category,
+                    is_checked_off,
+                    notes,
+                    added_by_member_id,
+                    is_active,
+                    planned_store_id
+                FROM shopping_list
+                WHERE is_active = 1 AND is_deleted = 0 AND is_checked_off = 0
+                  AND planned_store_id = ?
+                ORDER BY id DESC
+                """,
+                (int(store_id),),
+            ).fetchall()
+
+    return [_row_to_obj(r) for r in rows]
+
+
+def list_all_items() -> List[ShoppingListRow]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                display_name,
+                quantity,
+                unit,
+                category,
+                is_checked_off,
+                notes,
+                added_by_member_id,
+                is_active,
+                planned_store_id
+            FROM shopping_list
+            WHERE is_deleted = 0
+            ORDER BY id DESC
+            """
+        ).fetchall()
+    return [_row_to_obj(r) for r in rows]
+
 
 def add_item(
+    *,
     display_name: str,
-    quantity: Optional[float] = None,
-    unit: Optional[str] = None,
-    item_id: Optional[int] = None,
-    planned_store_id: Optional[int] = None,
-    added_by: Optional[str] = None,
-    notes: Optional[str] = None,
-) -> ShoppingListItem:
-    """
-    Add a new item to the shopping list and return it.
-    """
-    now = datetime.utcnow().isoformat(timespec="seconds")
-
-    with get_connection() as conn, closing(conn.cursor()) as cur:
-        cur.execute(
+    quantity: float = 1.0,
+    unit: str = "",
+    category: str = "",
+    notes: str = "",
+    added_by_member_id: Optional[int] = None,
+) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
             """
-            INSERT INTO shopping_list (
-                display_name,
-                quantity,
-                unit,
-                item_id,
-                planned_store_id,
-                added_by,
-                added_at,
-                is_checked_off,
-                is_active,
-                notes
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, ?)
+            INSERT INTO shopping_list (display_name, quantity, unit, category, notes, added_by_member_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                display_name,
-                quantity,
-                unit,
-                item_id,
-                planned_store_id,
-                added_by,
-                now,
-                notes,
+                (display_name or "").strip(),
+                float(quantity or 1.0),
+                (unit or "").strip(),
+                (category or "").strip(),
+                (notes or "").strip(),
+                int(added_by_member_id) if added_by_member_id is not None else None,
             ),
         )
-        new_id = cur.lastrowid
+        conn.commit()
+        return int(cur.lastrowid)
 
-        cur.execute(
-            """
-            SELECT
-                id, display_name, quantity, unit,
-                item_id, planned_store_id,
-                added_by, added_at,
-                is_checked_off, is_active, notes
-            FROM shopping_list
-            WHERE id = ?
-            """,
-            (new_id,),
+
+def set_checked_off(item_id: int, checked: bool) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE shopping_list SET is_checked_off = ? WHERE id = ?",
+            (1 if checked else 0, int(item_id)),
         )
-        row = cur.fetchone()
-
-    return _row_to_shopping_item(row)
+        conn.commit()
 
 
-def get_item_by_id(item_id: int) -> Optional[ShoppingListItem]:
+def delete_item(item_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE shopping_list SET is_deleted = 1 WHERE id = ?", (int(item_id),))
+        conn.commit()
+
+
+def clear_all_items() -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE shopping_list SET is_deleted = 1")
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# NEW: Planned store assignment (Milestone: “Use this plan”)
+# ---------------------------------------------------------------------------
+
+def clear_planned_store_ids_for_active_items(*, include_checked_off: bool = False) -> int:
     """
-    Fetch a single shopping list item by ID.
+    Clears planned_store_id for active items (optionally including checked-off ones).
+    Returns the number of rows affected (best-effort; sqlite may return -1 in some cases).
     """
-    with get_connection() as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT
-                id, display_name, quantity, unit,
-                item_id, planned_store_id,
-                added_by, added_at,
-                is_checked_off, is_active, notes
-            FROM shopping_list
-            WHERE id = ?
-            """,
-            (item_id,),
-        )
-        row = cur.fetchone()
-
-    return _row_to_shopping_item(row) if row else None
-
-
-def list_active_items(
-    include_checked_off: bool = False,
-    store_id: Optional[int] = None,
-) -> List[ShoppingListItem]:
-    """
-    List items that are still active. Optionally filter by store,
-    and optionally include those already checked off.
-    """
-    where_clauses = ["is_active = 1"]
-
-    params = []
-
+    where = "is_active = 1 AND is_deleted = 0"
     if not include_checked_off:
-        where_clauses.append("is_checked_off = 0")
+        where += " AND is_checked_off = 0"
 
-    if store_id is not None:
-        where_clauses.append("planned_store_id = ?")
-        params.append(store_id)
-
-    where_sql = " AND ".join(where_clauses)
-
-    query = f"""
-        SELECT
-            id, display_name, quantity, unit,
-            item_id, planned_store_id,
-            added_by, added_at,
-            is_checked_off, is_active, notes
-        FROM shopping_list
-        WHERE {where_sql}
-        ORDER BY added_at ASC, id ASC
-    """
-
-    with get_connection() as conn, closing(conn.cursor()) as cur:
-        cur.execute(query, params)
-        rows = cur.fetchall()
-
-    return [_row_to_shopping_item(r) for r in rows]
+    with get_connection() as conn:
+        cur = conn.execute(f"UPDATE shopping_list SET planned_store_id = NULL WHERE {where}")
+        conn.commit()
+        return int(cur.rowcount or 0)
 
 
-def mark_checked_off(item_id: int, checked: bool = True) -> None:
-    """
-    Mark a shopping item as checked off (or undo).
-    """
-    with get_connection() as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            UPDATE shopping_list
-            SET is_checked_off = ?
-            WHERE id = ?
-            """,
-            (1 if checked else 0, item_id),
+def set_planned_store_id(item_id: int, planned_store_id: Optional[int]) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE shopping_list SET planned_store_id = ? WHERE id = ?",
+            (int(planned_store_id) if planned_store_id is not None else None, int(item_id)),
         )
+        conn.commit()
 
 
-def soft_delete_item(item_id: int) -> None:
+def bulk_set_planned_store_ids(assignments: List[Tuple[int, Optional[int]]]) -> int:
     """
-    Soft-delete an item (keep history, but hide from active list).
+    assignments = [(item_id, planned_store_id_or_None), ...]
+    Returns number of attempted updates.
     """
-    with get_connection() as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            UPDATE shopping_list
-            SET is_active = 0
-            WHERE id = ?
-            """,
-            (item_id,),
+    if not assignments:
+        return 0
+
+    rows = [(int(item_id), int(store_id) if store_id is not None else None) for (item_id, store_id) in assignments]
+
+    with get_connection() as conn:
+        conn.executemany(
+            "UPDATE shopping_list SET planned_store_id = ? WHERE id = ?",
+            [(store_id, item_id) for (item_id, store_id) in rows],
         )
+        conn.commit()
 
-
-def clear_checked_off_items() -> None:
-    """
-    Mark all checked-off items as inactive. Useful after a completed shop.
-    """
-    with get_connection() as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            UPDATE shopping_list
-            SET is_active = 0
-            WHERE is_checked_off = 1
-            """
-        )
+    return len(rows)
