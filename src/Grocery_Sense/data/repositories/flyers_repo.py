@@ -461,12 +461,17 @@ class FlyersRepo:
         Rules:
           - allergies always hard exclude
           - master hard excludes override all
+<<<<<<< HEAD
           - secondary excludes become soft excludes (we annotate with pref_soft_excluded_by)
+=======
+          - secondary excludes become soft excludes (we annotate with who + what matched)
+>>>>>>> f6b52b15a93ede3e237609b6fb89fcaa0ad9b391
           - optionally filter oils based on baseline oils_allowed (or annotate via pref_oil_allowed)
         """
         if not deals:
             return deals
 
+<<<<<<< HEAD
         # If EffectivePreferences contract is missing, fail safe
         hard_set = set(getattr(eff, "hard_excludes", []) or [])
         soft_map = getattr(eff, "soft_excludes_by_member", {}) or {}
@@ -517,12 +522,104 @@ class FlyersRepo:
                 ot = normalize_token(o)
                 if ot and f" {ot} " in f" {t} ":
                     return ot
+=======
+        def normalize_token(s: str) -> str:
+            return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).strip()
+
+        def deal_text(d: Dict[str, Any]) -> str:
+            return f"{d.get('title','')} {d.get('description','')}"
+
+        # ---- pull effective prefs in a robust way ----
+        hard_set = set(normalize_token(x) for x in (getattr(eff, "hard_excludes", None) or []))
+
+        # Soft excludes can come as:
+        # 1) eff.soft_excludes: ingredient -> [members]
+        # 2) eff.soft_excludes_by_member: member -> [ingredients]
+        soft_ingredient_to_members: Dict[str, List[str]] = {}
+        soft_by_member = getattr(eff, "soft_excludes_by_member", None)
+        if isinstance(soft_by_member, dict):
+            # invert member->items into item->members
+            for member_name, items in soft_by_member.items():
+                for item in (items or []):
+                    it = normalize_token(str(item))
+                    if not it:
+                        continue
+                    soft_ingredient_to_members.setdefault(it, [])
+                    if str(member_name) not in soft_ingredient_to_members[it]:
+                        soft_ingredient_to_members[it].append(str(member_name))
+        else:
+            soft_map = getattr(eff, "soft_excludes", None)
+            if isinstance(soft_map, dict):
+                for ingredient, members in soft_map.items():
+                    ing = normalize_token(str(ingredient))
+                    if not ing:
+                        continue
+                    mlst: List[str] = []
+                    if isinstance(members, list):
+                        mlst = [str(x) for x in members if str(x).strip()]
+                    soft_ingredient_to_members[ing] = mlst
+
+        oils_allowed_raw = getattr(eff, "oils_allowed", None) or set()
+        oils_allowed_norm = set(normalize_token(str(x)) for x in oils_allowed_raw if str(x).strip())
+
+        # Determine oils list (fallback to preferences_service.OILS if present)
+        oils_list: List[str] = []
+        try:
+            from Grocery_Sense.services import preferences_service
+
+            oils_list = [str(x).strip().lower() for x in getattr(preferences_service, "OILS", []) or []]
+        except Exception:
+            oils_list = ["olive oil", "avocado oil", "vegetable oil", "canola oil", "coconut oil"]
+
+        oils_list_norm = [normalize_token(o) for o in oils_list if normalize_token(o)]
+
+        def find_hard_hits(text: str) -> set[str]:
+            t = normalize_token(text)
+            hits: set[str] = set()
+            for c in hard_set:
+                if not c:
+                    continue
+                if f" {c} " in f" {t} ":
+                    hits.add(c)
+            return hits
+
+        def find_soft_hits_and_excluders(text: str) -> tuple[List[str], List[str]]:
+            """
+            Returns:
+              (soft_excluders, soft_hit_ingredients)
+            where:
+              soft_excluders = unique member names
+              soft_hit_ingredients = unique ingredients (tokens) that matched
+            """
+            t = normalize_token(text)
+            excluders: List[str] = []
+            hit_ings: List[str] = []
+
+            for ing, members in soft_ingredient_to_members.items():
+                if not ing:
+                    continue
+                if f" {ing} " in f" {t} ":
+                    if ing not in hit_ings:
+                        hit_ings.append(ing)
+                    for m in (members or []):
+                        if m and m not in excluders:
+                            excluders.append(m)
+
+            return excluders, hit_ings
+
+        def oil_hit(text: str) -> Optional[str]:
+            t = normalize_token(text)
+            for o in oils_list_norm:
+                if o and f" {o} " in f" {t} ":
+                    return o
+>>>>>>> f6b52b15a93ede3e237609b6fb89fcaa0ad9b391
             return None
 
         filtered: List[Dict[str, Any]] = []
 
         for d in deals:
             txt = deal_text(d)
+<<<<<<< HEAD
 
             # 1) Hard excludes: remove
             hard_hits = find_hits(txt, hard_set)
@@ -552,3 +649,41 @@ class FlyersRepo:
             filtered.append(d)
 
         return filtered
+=======
+
+            # 1) Hard excludes => remove
+            hard_hits = find_hard_hits(txt)
+            if hard_hits:
+                d["pref_hard_excluded"] = True
+                d["pref_hard_excluded_hits"] = sorted(hard_hits)
+                continue
+            d["pref_hard_excluded"] = False
+            d["pref_hard_excluded_hits"] = []
+
+            # 2) Soft excludes => annotate who + ingredient hit(s)
+            excluders, hit_ings = find_soft_hits_and_excluders(txt)
+            d["pref_soft_excluded_by"] = excluders
+            d["pref_soft_excluded_hits"] = hit_ings  # <-- this is what the tooltip uses
+
+            # 3) Oils => filter or annotate
+            oh = oil_hit(txt)
+            if oh:
+                if oils_allowed_norm:
+                    allowed = oh in oils_allowed_norm
+                    d["pref_oil_allowed"] = bool(allowed)
+                    d["pref_oil_hit"] = oh
+                    if filter_disallowed_oils and not allowed:
+                        continue
+                else:
+                    # oils unrestricted if oils_allowed is empty
+                    d["pref_oil_allowed"] = True
+                    d["pref_oil_hit"] = oh
+            else:
+                d["pref_oil_allowed"] = True
+                d["pref_oil_hit"] = ""
+
+            filtered.append(d)
+
+        return filtered
+
+>>>>>>> f6b52b15a93ede3e237609b6fb89fcaa0ad9b391
