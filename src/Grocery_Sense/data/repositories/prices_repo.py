@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple, Dict, Any
 
-from Grocery_Sense import config_store
+from Grocery_Sense.data.connection import get_connection
 from Grocery_Sense.domain.models import PricePoint, PriceStats
-
-
-def get_connection():
-    return sqlite3.connect(config_store.get_db_path())
 
 
 def add_price_point(

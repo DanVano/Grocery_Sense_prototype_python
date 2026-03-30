@@ -3,6 +3,70 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from Grocery_Sense.data.repositories import shopping_list_repo
+from Grocery_Sense.data.repositories.shopping_list_repo import ShoppingListRow
+
+
+class ShoppingListService:
+    """
+    Object-oriented wrapper around the shopping_list module-level functions.
+    Provides the interface expected by tests and UI code that instantiates this class.
+    """
+
+    def add_items_from_text(
+        self,
+        text: str,
+        *,
+        planned_store_id: Optional[int] = None,
+        added_by: Optional[str] = None,
+    ) -> List[ShoppingListRow]:
+        """
+        Parse a comma-separated string of item names and add each to the list.
+        Returns the newly created ShoppingListRow objects.
+        """
+        member_id: Optional[int] = None
+        created: List[ShoppingListRow] = []
+        for raw in text.split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            row_id = shopping_list_repo.add_item(
+                display_name=name,
+                notes=added_by or "",
+                added_by_member_id=member_id,
+            )
+            if planned_store_id is not None:
+                shopping_list_repo.set_planned_store_id(row_id, planned_store_id)
+            rows = shopping_list_repo.list_active_items()
+            match = next((r for r in rows if r.id == row_id), None)
+            if match:
+                created.append(match)
+        return created
+
+    def summarize_list_for_display(self, *, include_checked_off: bool = False) -> str:
+        """Return a plain-text summary of the current shopping list."""
+        if include_checked_off:
+            items = shopping_list_repo.list_all_items()
+        else:
+            items = shopping_list_repo.list_active_items()
+        if not items:
+            return "(empty)"
+        lines = []
+        for it in items:
+            status = "[x]" if it.is_checked_off else "[ ]"
+            qty = f" x{it.quantity}" if it.quantity and it.quantity != 1.0 else ""
+            unit = f" {it.unit}" if it.unit else ""
+            lines.append(f"  {status} {it.display_name}{qty}{unit}")
+        return "\n".join(lines)
+
+    def check_off_item(self, item_id: int, *, checked: bool = True) -> None:
+        shopping_list_repo.set_checked_off(item_id, checked)
+
+    def clear_all_checked_off(self) -> None:
+        """Mark all checked-off active items as deleted."""
+        items = shopping_list_repo.list_all_items()
+        for it in items:
+            if it.is_checked_off and it.is_active:
+                shopping_list_repo.delete_item(it.id)
 
 
 def get_active_items(*, store_id: Optional[int] = None):

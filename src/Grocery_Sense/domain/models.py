@@ -82,6 +82,18 @@ class PricePoint:
     confidence: Optional[int] = None  # 1–5
 
 
+# ---------- Price stats ----------
+
+@dataclass
+class PriceStats:
+    item_id: int
+    store_id: Optional[int]
+    min_price: Optional[float]
+    max_price: Optional[float]
+    avg_price: Optional[float]
+    count: int
+
+
 # ---------- Shopping list ----------
 
 @dataclass

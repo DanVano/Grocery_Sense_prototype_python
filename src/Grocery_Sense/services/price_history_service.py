@@ -210,11 +210,14 @@ class PriceHistoryService:
         if not item:
             return None
 
-        stats = get_price_stats_for_item(item_id=item.id, window_days=window_days)
-        if not stats:
+        stats = get_price_stats_for_item(item_id=item.id, since_days=window_days)
+        if stats.count == 0:
             return None
 
-        avg_price, min_price, max_price, count = stats
+        avg_price = stats.avg_price
+        min_price = stats.min_price
+        max_price = stats.max_price
+        count = stats.count
         return {
             "item": item,
             "avg_unit_price": avg_price,
@@ -264,8 +267,8 @@ class PriceHistoryService:
                 ),
             }
 
-        stats = get_price_stats_for_item(item_id=item.id, window_days=window_days)
-        if not stats:
+        stats = get_price_stats_for_item(item_id=item.id, since_days=window_days)
+        if stats.count == 0:
             return {
                 "item": item,
                 "has_history": False,
@@ -280,7 +283,10 @@ class PriceHistoryService:
                 ),
             }
 
-        avg_price, min_price, max_price, count = stats
+        avg_price = stats.avg_price
+        min_price = stats.min_price
+        max_price = stats.max_price
+        count = stats.count
         if avg_price <= 0 or count == 0:
             return {
                 "item": item,

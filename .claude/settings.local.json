@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l \"/c/Coding Projects/Grocery-Sense-prototype-python-main\"/src/Grocery_Sense/**/*.py)",
+      "Bash(xargs wc:*)"
+    ]
+  }
+}

@@ -580,6 +580,70 @@ def get_household_allergies() -> Set[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Postal code & store priority helpers (used by deals_service)
+# ---------------------------------------------------------------------------
+
+def get_postal_code() -> str:
+    """Return the household postal code from config (empty string if unset)."""
+    return load_config().postal_code or ""
+
+
+def get_store_priority() -> List[str]:
+    """Return store names sorted by their priority (highest first).
+
+    store_priority is stored as {store_name: priority_int} in UserConfig.
+    Returns a list of names ordered from highest to lowest priority.
+    """
+    priorities: Dict[str, int] = load_config().store_priority or {}
+    return [name for name, _ in sorted(priorities.items(), key=lambda x: x[1], reverse=True)]
+
+
+# ---------------------------------------------------------------------------
+# Simple file-based cache (used by deals_service)
+# ---------------------------------------------------------------------------
+
+_CACHE_FILE = _CONFIG_DIR / "deals_cache.json"
+
+
+def _load_cache() -> Dict[str, Any]:
+    if _CACHE_FILE.exists():
+        try:
+            return json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_cache(data: Dict[str, Any]) -> None:
+    _CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cache_get(key: str, *, max_age_days: int = 7) -> Optional[Any]:
+    """Return the cached value for *key* if it exists and is not older than max_age_days.
+
+    Returns None on miss or expiry.
+    """
+    import time
+    cache = _load_cache()
+    entry = cache.get(key)
+    if not entry or not isinstance(entry, dict):
+        return None
+    stored_at = entry.get("stored_at", 0)
+    age_days = (time.time() - stored_at) / 86400.0
+    if age_days > max_age_days:
+        return None
+    return entry.get("value")
+
+
+def cache_set(key: str, value: Any) -> None:
+    """Store *value* in the cache under *key*, tagged with the current timestamp."""
+    import time
+    cache = _load_cache()
+    cache[key] = {"stored_at": time.time(), "value": value}
+    _save_cache(cache)
+
+
 def reset_secondary_member_to_household_baseline(member_id: int) -> bool:
     """
     Clears SECONDARY member overrides back to baseline while preserving allergies.

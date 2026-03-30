@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from Grocery_Sense.data.db import get_connection
+from Grocery_Sense.data.connection import get_connection
 
 
 @dataclass
