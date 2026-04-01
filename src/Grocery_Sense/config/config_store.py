@@ -412,14 +412,25 @@ def _to_raw_config(cfg: UserConfig) -> Dict[str, Any]:
 # Public config API
 # ---------------------------------------------------------------------------
 
+_config_cache: Optional[UserConfig] = None
+_config_mtime: Optional[float] = None
+
+
 def load_config() -> UserConfig:
-    raw = _read_raw_config()
-    cfg = _from_raw_config(raw)
-    return cfg
+    global _config_cache, _config_mtime
+    mtime = _CONFIG_FILE.stat().st_mtime if _CONFIG_FILE.exists() else 0.0
+    if _config_cache is None or mtime != _config_mtime:
+        raw = _read_raw_config()
+        _config_cache = _from_raw_config(raw)
+        _config_mtime = mtime
+    return _config_cache
 
 
 def save_config(cfg: UserConfig) -> None:
+    global _config_cache, _config_mtime
     _write_raw_config(_to_raw_config(cfg))
+    _config_cache = cfg
+    _config_mtime = _CONFIG_FILE.stat().st_mtime if _CONFIG_FILE.exists() else None
 
 
 # ---------------------------------------------------------------------------
