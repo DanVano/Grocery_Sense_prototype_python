@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import HttpResponseError, ServiceRequestError
 from rapidfuzz import fuzz, process
 
 from Grocery_Sense.data.connection import get_connection
@@ -198,24 +200,51 @@ class AzureReceiptClient:
             credential=AzureKeyCredential(self.api_key),
         )
 
-    def analyze_receipt_file(self, file_path: str | Path) -> Tuple[str, Dict[str, Any]]:
+    def analyze_receipt_file(
+        self,
+        file_path: str | Path,
+        *,
+        max_attempts: int = 3,
+        base_delay: float = 2.0,
+    ) -> Tuple[str, Dict[str, Any]]:
         p = Path(file_path)
         if not p.exists():
             raise FileNotFoundError(str(p))
 
-        with p.open("rb") as f:
-            poller = self.client.begin_analyze_document(
-                "prebuilt-receipt",
-                body=f,
-                locale=self.locale,
-            )
-        result = poller.result()
+        last_exc: Exception = RuntimeError("No attempts made")
+        for attempt in range(max_attempts):
+            try:
+                with p.open("rb") as f:
+                    poller = self.client.begin_analyze_document(
+                        "prebuilt-receipt",
+                        body=f,
+                        locale=self.locale,
+                    )
+                result = poller.result()
 
-        operation_id = str(poller.details.get("operation_id") or "")
-        if not operation_id:
-            operation_id = f"op_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{p.stem}"
+                operation_id = str(poller.details.get("operation_id") or "")
+                if not operation_id:
+                    operation_id = f"op_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{p.stem}"
 
-        return operation_id, result.as_dict()
+                return operation_id, result.as_dict()
+
+            except HttpResponseError as exc:
+                status = exc.status_code if exc.status_code is not None else 0
+                # Non-retriable: bad request, auth, not found
+                if status in (400, 401, 403, 404):
+                    raise
+                # Retriable: throttle (429) or server errors (5xx)
+                last_exc = exc
+
+            except ServiceRequestError as exc:
+                # Network-level transient error — always retriable
+                last_exc = exc
+
+            if attempt < max_attempts - 1:
+                delay = base_delay * (2 ** attempt)
+                time.sleep(delay)
+
+        raise last_exc
 
     def analyze_and_save_json(
         self,
