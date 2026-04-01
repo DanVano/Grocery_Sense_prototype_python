@@ -502,15 +502,31 @@ class BasketOptimizerService:
     # Store selection
     # ---------------------------------------------------------------------
 
+    def _score_store(self, s: Any, total: float, unknown: int) -> float:
+        “””
+        Base store score: estimated cost + unknown-item penalty + favourite/priority bonus.
+        Lower is better.
+        “””
+        score = total + (unknown * 5.0)
+        try:
+            if bool(getattr(s, “is_favorite”, False)):
+                score *= 0.985
+            pr = int(getattr(s, “priority”, 0) or 0)
+            if pr > 0:
+                score *= max(0.97, 1.0 - (min(pr, 10) * 0.002))
+        except Exception:
+            pass
+        return score
+
     def _choose_best_single_store(
         self,
         items: List[BasketItemPlan],
         stores: List[Any],
         price_matrix: Dict[Tuple[int, int], PricePick],
     ) -> int:
-        """
+        “””
         Best single store by estimated total cost, with a small bonus for favorites/priority.
-        """
+        “””
         best_id = int(stores[0].id)
         best_score: Optional[float] = None
 
@@ -525,19 +541,7 @@ class BasketOptimizerService:
                     continue
                 total += pick.unit_price * it.quantity
 
-            # Unknown penalty (so stores with lots of missing data don't always “win”)
-            score = total + (unknown * 5.0)
-
-            # Favorites/priority weighting (small)
-            try:
-                if bool(getattr(s, "is_favorite", False)):
-                    score *= 0.985  # tiny bonus
-                pr = int(getattr(s, "priority", 0) or 0)
-                if pr > 0:
-                    score *= max(0.97, 1.0 - (min(pr, 10) * 0.002))  # up to ~2% bonus
-            except Exception:
-                pass
-
+            score = self._score_store(s, total, unknown)
             if best_score is None or score < best_score:
                 best_score = score
                 best_id = sid
@@ -550,16 +554,16 @@ class BasketOptimizerService:
         stores: List[Any],
         price_matrix: Dict[Tuple[int, int], PricePick],
     ) -> List[int]:
-        """
+        “””
         Choose up to two stores. We:
           1) rank stores by single-store score
           2) evaluate store pairs among top K candidates
           3) pick pair with lowest basket assignment total + small travel penalty
-        """
+        “””
         if len(stores) == 1:
             return [int(stores[0].id)]
 
-        # Step 1: rank by single store
+        # Step 1: rank by single-store score
         ranked = []
         for s in stores:
             sid = int(s.id)
@@ -571,19 +575,7 @@ class BasketOptimizerService:
                     unknown += 1
                     continue
                 total += pick.unit_price * it.quantity
-            score = total + (unknown * 5.0)
-
-            # favorites/priority weighting
-            try:
-                if bool(getattr(s, "is_favorite", False)):
-                    score *= 0.985
-                pr = int(getattr(s, "priority", 0) or 0)
-                if pr > 0:
-                    score *= max(0.97, 1.0 - (min(pr, 10) * 0.002))
-            except Exception:
-                pass
-
-            ranked.append((score, sid))
+            ranked.append((self._score_store(s, total, unknown), sid))
         ranked.sort(key=lambda x: x[0])
 
         # Evaluate pairs among top K
@@ -592,6 +584,9 @@ class BasketOptimizerService:
 
         best_pair: List[int] = [candidates[0], candidates[1]]
         best_score: Optional[float] = None
+
+        # Build once; used inside the pair loop for the favourite tie-breaker
+        store_by_id = {int(s.id): s for s in stores}
 
         for i in range(len(candidates)):
             for j in range(i + 1, len(candidates)):
@@ -616,14 +611,13 @@ class BasketOptimizerService:
                     else:
                         total += min(ua, ub) * it.quantity
 
-                # Two-store travel penalty (constant)
+                # Two-store travel penalty + weaker favourite tie-breaker
                 score = total + (unknown * 5.0) + 6.0
-
-                # If either store is favorite, tiny bonus
-                # (we don't have distance, so this is just a tie-breaker)
                 try:
-                    store_by_id = {int(s.id): s for s in stores}
-                    if bool(getattr(store_by_id.get(a), "is_favorite", False)) or bool(getattr(store_by_id.get(b), "is_favorite", False)):
+                    if (
+                        bool(getattr(store_by_id.get(a), “is_favorite”, False))
+                        or bool(getattr(store_by_id.get(b), “is_favorite”, False))
+                    ):
                         score *= 0.99
                 except Exception:
                     pass
