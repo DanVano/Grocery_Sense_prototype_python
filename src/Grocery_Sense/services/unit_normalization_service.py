@@ -10,6 +10,18 @@ from Grocery_Sense.data.connection import get_connection
 LB_TO_KG = 0.45359237
 KG_TO_LB = 2.2046226218
 
+# Volume conversions (all relative to 1 litre)
+ML_PER_L = 1000.0
+FL_OZ_PER_L = 33.8140226
+CUP_PER_L = 4.22675284
+TBSP_PER_L = 67.6280454
+TSP_PER_L = 202.884136
+GAL_PER_L = 0.264172052
+PINT_PER_L = 2.11337642
+
+# Weight oz
+G_PER_OZ = 28.3495231
+
 
 @dataclass(frozen=True)
 class NormalizedPrice:
@@ -93,12 +105,12 @@ class UnitNormalizationService:
     def set_item_default_unit_if_missing(self, item_id: int, observed_unit: str) -> None:
         """
         If items.default_unit is NULL/empty, set it to observed_unit.
-        Only sets meaningful units (each/lb/kg/g).
+        Only sets meaningful (recognized) units.
         """
         self.ensure_schema()
         observed_unit = self._normalize_unit(observed_unit)
 
-        if observed_unit not in ("each", "lb", "kg", "g"):
+        if observed_unit == "unknown":
             return
 
         cur = self.get_item_default_unit(item_id)
@@ -174,25 +186,54 @@ class UnitNormalizationService:
 
     def guess_unit_from_text(self, text: str) -> str:
         """
-        Basic heuristics from receipt text.
-        Examples it catches:
-          - "1.25 kg", "KG", "kg @"
-          - "2.0 lb", "LB", "lbs"
-          - "500 g", "G"
+        Infer unit from receipt/flyer text.
+
+        Weight:  kg, g, lb, oz
+        Volume:  L, ml, fl oz, cup, tbsp, tsp, gal, pint
+        Count:   each, pack, case, bunch, dozen
         """
         t = (text or "").lower()
 
-        # kg
+        # --- weight ---
         if re.search(r"\bkg\b", t) or re.search(r"\bkilogram(s)?\b", t):
             return "kg"
-
-        # g (avoid matching 'g' in random words by requiring number near it)
         if re.search(r"(\d+(\.\d+)?)\s*g\b", t) or re.search(r"\bgrams?\b", t):
             return "g"
-
-        # lb / lbs / #
         if re.search(r"\blb(s)?\b", t) or re.search(r"\bpound(s)?\b", t) or re.search(r"\b#\b", t):
             return "lb"
+        # fluid oz before plain oz so "fl oz" is caught first
+        if re.search(r"\bfl\.?\s*oz\b", t) or re.search(r"\bfluid\s+ounce(s)?\b", t):
+            return "fl_oz"
+        if re.search(r"\boz\b", t) or re.search(r"\bounce(s)?\b", t):
+            return "oz"
+
+        # --- volume ---
+        if re.search(r"\blitres?\b", t) or re.search(r"\bliters?\b", t) or re.search(r"\b(\d+(\.\d+)?)\s*l\b", t):
+            return "L"
+        if re.search(r"\bml\b", t) or re.search(r"\bmillilitres?\b", t) or re.search(r"\bmilliliters?\b", t):
+            return "ml"
+        if re.search(r"\bcups?\b", t):
+            return "cup"
+        if re.search(r"\btbsp\b", t) or re.search(r"\btablespoons?\b", t):
+            return "tbsp"
+        if re.search(r"\btsp\b", t) or re.search(r"\bteaspoons?\b", t):
+            return "tsp"
+        if re.search(r"\bgallons?\b", t) or re.search(r"\bgal\b", t):
+            return "gal"
+        if re.search(r"\bpints?\b", t):
+            return "pint"
+
+        # --- count / pack ---
+        if re.search(r"\bdozen\b", t):
+            return "dozen"
+        if re.search(r"\bbunch(es)?\b", t):
+            return "bunch"
+        if re.search(r"\bcase(s)?\b", t):
+            return "case"
+        if re.search(r"\bpack(s|age|ages)?\b", t):
+            return "pack"
+        if re.search(r"\b(ea|each|unit(s)?|ct|count)\b", t):
+            return "each"
 
         return "unknown"
 
@@ -205,7 +246,7 @@ class UnitNormalizationService:
             return "unknown"
         s = str(u).strip().lower()
 
-        # common normalizations
+        # weight
         if s in ("ea", "each", "unit", "units", "ct", "count"):
             return "each"
         if s in ("lb", "lbs", "#", "pound", "pounds"):
@@ -214,18 +255,47 @@ class UnitNormalizationService:
             return "kg"
         if s in ("g", "gram", "grams"):
             return "g"
+        if s in ("oz", "ounce", "ounces"):
+            return "oz"
+
+        # volume
+        if s in ("l", "litre", "litres", "liter", "liters"):
+            return "L"
+        if s in ("ml", "millilitre", "millilitres", "milliliter", "milliliters"):
+            return "ml"
+        if s in ("fl oz", "fl_oz", "floz", "fluid oz", "fluid ounce", "fluid ounces"):
+            return "fl_oz"
+        if s in ("cup", "cups"):
+            return "cup"
+        if s in ("tbsp", "tablespoon", "tablespoons"):
+            return "tbsp"
+        if s in ("tsp", "teaspoon", "teaspoons"):
+            return "tsp"
+        if s in ("gal", "gallon", "gallons"):
+            return "gal"
+        if s in ("pint", "pints", "pt"):
+            return "pint"
+
+        # count / pack
+        if s in ("dozen", "doz"):
+            return "dozen"
+        if s in ("bunch", "bunches"):
+            return "bunch"
+        if s in ("case", "cases"):
+            return "case"
+        if s in ("pack", "packs", "package", "packages", "pkg"):
+            return "pack"
 
         return "unknown"
 
     def _convert(self, *, unit_price: float, from_unit: str, to_unit: str) -> Optional[float]:
         """
-        Convert a per-unit price between units.
+        Convert a per-unit price between compatible units.
 
-        If price is $/lb and you want $/kg:
-          $/kg = $/lb * (lb per kg) = $/lb * 2.20462262
-
-        If price is $/kg and you want $/lb:
-          $/lb = $/kg * (kg per lb) = $/kg * 0.45359237
+        Strategy: convert both units to a common base, then scale.
+          Weight base: kg
+          Volume base: L
+          Count base:  each (dozen only)
         """
         from_unit = self._normalize_unit(from_unit)
         to_unit = self._normalize_unit(to_unit)
@@ -233,16 +303,42 @@ class UnitNormalizationService:
         if from_unit == to_unit:
             return float(unit_price)
 
-        # lb <-> kg
-        if from_unit == "lb" and to_unit == "kg":
-            return float(unit_price) * KG_TO_LB  # $/lb -> $/kg
-        if from_unit == "kg" and to_unit == "lb":
-            return float(unit_price) * LB_TO_KG  # $/kg -> $/lb
+        p = float(unit_price)
 
-        # g <-> kg (price per g to price per kg, etc.)
-        if from_unit == "g" and to_unit == "kg":
-            return float(unit_price) * 1000.0
-        if from_unit == "kg" and to_unit == "g":
-            return float(unit_price) / 1000.0
+        # price_per_to = price_per_from * (base_per_to / base_per_from)
+        # e.g. $2/lb -> $/kg: $2 * (kg_per_kg / kg_per_lb) = $2 * (1.0 / 0.4536) = $4.41/kg
+        _weight_kg_per_unit: dict = {
+            "kg": 1.0,
+            "g": 0.001,
+            "lb": LB_TO_KG,
+            "oz": G_PER_OZ / 1000.0,
+        }
+
+        # ---- volume (base: L) ----
+        # 1 unit = ? litres
+        _volume_l_per_unit: dict = {
+            "L": 1.0,
+            "ml": 1.0 / ML_PER_L,
+            "fl_oz": 1.0 / FL_OZ_PER_L,
+            "cup": 1.0 / CUP_PER_L,
+            "tbsp": 1.0 / TBSP_PER_L,
+            "tsp": 1.0 / TSP_PER_L,
+            "gal": 1.0 / GAL_PER_L,
+            "pint": 1.0 / PINT_PER_L,
+        }
+
+        if from_unit in _weight_kg_per_unit and to_unit in _weight_kg_per_unit:
+            factor = _weight_kg_per_unit[to_unit] / _weight_kg_per_unit[from_unit]
+            return p * factor
+
+        if from_unit in _volume_l_per_unit and to_unit in _volume_l_per_unit:
+            factor = _volume_l_per_unit[to_unit] / _volume_l_per_unit[from_unit]
+            return p * factor
+
+        # dozen <-> each
+        if from_unit == "dozen" and to_unit == "each":
+            return p / 12.0
+        if from_unit == "each" and to_unit == "dozen":
+            return p * 12.0
 
         return None
