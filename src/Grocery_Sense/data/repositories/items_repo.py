@@ -28,7 +28,7 @@ items(
 from __future__ import annotations
 
 from contextlib import closing
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from Grocery_Sense.data.connection import get_connection
 from Grocery_Sense.domain.models import Item
@@ -297,6 +297,31 @@ def set_item_tracked(item_id: int, is_tracked: bool) -> None:
             (1 if is_tracked else 0, int(item_id)),
         )
         conn.commit()
+
+
+def get_items_by_ids(item_ids: List[int]) -> Dict[int, Item]:
+    """Return a {item_id: Item} map for a list of ids in a single query.
+
+    Replaces N calls to get_item_by_id(item_id) in loops.
+    Missing ids are silently omitted from the result.
+    """
+    if not item_ids:
+        return {}
+
+    id_csv = ",".join(str(int(x)) for x in item_ids)
+    sql = f"""
+        SELECT id, canonical_name, category, default_unit,
+               typical_package_size, typical_package_unit, is_tracked, notes, created_at
+        FROM items
+        WHERE id IN ({id_csv})
+    """
+
+    out: Dict[int, Item] = {}
+    with closing(get_connection()) as conn:
+        for row in conn.execute(sql).fetchall():
+            item = _row_to_item(row)
+            out[item.id] = item
+    return out
 
 
 def update_item_notes(item_id: int, notes: Optional[str]) -> None:

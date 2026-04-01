@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Any, Callable, Dict, List, Optional
@@ -81,8 +82,14 @@ class DealFeedWindow(tk.Toplevel):
             command=self._refresh,
         ).grid(row=1, column=2, columnspan=2, sticky="w", pady=(8, 0))
 
-        ttk.Button(filters, text="Refresh", command=self._refresh).grid(row=0, column=4, sticky="e")
+        self._refresh_btn = ttk.Button(filters, text="Refresh", command=self._refresh)
+        self._refresh_btn.grid(row=0, column=4, sticky="e")
         filters.columnconfigure(4, weight=1)
+
+        self._status_var = tk.StringVar(value="")
+        ttk.Label(filters, textvariable=self._status_var, foreground="#666").grid(
+            row=2, column=0, columnspan=5, sticky="w", pady=(4, 0)
+        )
 
         body = ttk.PanedWindow(root, orient="horizontal")
         body.pack(fill="both", expand=True)
@@ -204,12 +211,17 @@ class DealFeedWindow(tk.Toplevel):
     # ---------------- data ----------------
 
     def _load_stores(self) -> None:
-        try:
-            stores = self._repo.list_stores()
-        except Exception as e:
-            self._log_msg(f"DealFeed: failed to load stores: {e}")
-            stores = []
+        def worker():
+            try:
+                stores = self._repo.list_stores()
+            except Exception as e:
+                self._log_msg(f"DealFeed: failed to load stores: {e}")
+                stores = []
+            self.after(0, lambda: self._populate_stores(stores))
 
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _populate_stores(self, stores) -> None:
         labels = ["All stores"]
         self._store_label_to_id = {"All stores": None}
 
@@ -243,29 +255,46 @@ class DealFeedWindow(tk.Toplevel):
 
     def _refresh(self) -> None:
         self._hide_tooltip()
+        self._refresh_btn.config(state="disabled")
+        self._status_var.set("Loading deals…")
 
         store_id = self._store_label_to_id.get(self._store_var.get(), None)
         include_disallowed_oils = bool(self._include_disallowed_oils_var.get())
 
-        try:
-            self._all_deals = self._repo.list_active_deals(
-                store_id=store_id,
-                apply_preferences=True,
-                include_soft_excluded=True,
-                include_disallowed_oils=include_disallowed_oils,
-            )
-        except AttributeError:
+        def worker():
+            try:
+                deals = self._repo.list_active_deals(
+                    store_id=store_id,
+                    apply_preferences=True,
+                    include_soft_excluded=True,
+                    include_disallowed_oils=include_disallowed_oils,
+                )
+                self.after(0, lambda: self._on_refresh_done(deals, None))
+            except AttributeError:
+                self.after(0, lambda: self._on_refresh_done(None, "missing_method"))
+            except Exception as e:
+                self.after(0, lambda: self._on_refresh_done(None, e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_refresh_done(self, deals, error) -> None:
+        self._refresh_btn.config(state="normal")
+        if error == "missing_method":
             messagebox.showerror(
                 "Missing method",
                 "FlyersRepo.list_active_deals() was not found. Paste the updated flyers_repo.py first.",
                 parent=self,
             )
+            self._status_var.set("Error: missing method.")
             return
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load active deals: {e}", parent=self)
-            self._log_msg(f"DealFeed: failed to load deals: {e}")
+        if error is not None:
+            messagebox.showerror("Error", f"Failed to load active deals: {error}", parent=self)
+            self._log_msg(f"DealFeed: failed to load deals: {error}")
+            self._status_var.set("Error loading deals.")
             return
 
+        self._all_deals = deals
+        self._status_var.set(f"{len(self._all_deals)} deal(s) loaded.")
         self._apply_local_filters()
         self._log_msg(f"DealFeed: loaded {len(self._all_deals)} deals (active only)")
 

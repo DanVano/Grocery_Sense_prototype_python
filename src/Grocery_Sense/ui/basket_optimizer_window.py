@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Callable, Optional
@@ -56,12 +57,18 @@ class BasketOptimizerWindow(tk.Toplevel):
             variable=self._mode,
         ).grid(row=0, column=1, sticky="w", padx=(0, 20))
 
-        ttk.Button(
+        self._run_btn = ttk.Button(
             controls,
             text="Run Optimizer",
             command=self._run,
             width=18,
-        ).grid(row=0, column=2, sticky="e")
+        )
+        self._run_btn.grid(row=0, column=2, sticky="e")
+
+        self._status_var = tk.StringVar(value="")
+        ttk.Label(controls, textvariable=self._status_var, foreground="#666").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
 
         controls.columnconfigure(2, weight=1)
 
@@ -165,12 +172,28 @@ class BasketOptimizerWindow(tk.Toplevel):
     # ---------------- optimizer run + render ----------------
 
     def _run(self) -> None:
-        try:
-            self._result = self._svc.optimize(mode=self._mode.get())
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to run optimizer:\n\n{e}", parent=self)
+        self._run_btn.config(state="disabled")
+        self._status_var.set("Running optimizer…")
+        mode = self._mode.get()
+
+        def worker():
+            try:
+                result = self._svc.optimize(mode=mode)
+                self.after(0, lambda: self._on_run_done(result, None))
+            except Exception as exc:
+                self.after(0, lambda: self._on_run_done(None, exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_run_done(self, result, error) -> None:
+        self._run_btn.config(state="normal")
+        if error is not None:
+            self._status_var.set("Optimizer failed.")
+            messagebox.showerror("Error", f"Failed to run optimizer:\n\n{error}", parent=self)
             return
 
+        self._result = result
+        self._status_var.set("Done.")
         self._render_summary()
         self._render_stores()
 

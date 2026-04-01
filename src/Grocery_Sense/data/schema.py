@@ -144,21 +144,64 @@ def create_tables(conn: sqlite3.Connection) -> None:
         ON prices(item_id, store_id, date);
         """
     )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prices_flyer_source_id
+        ON prices(flyer_source_id);
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prices_source_date
+        ON prices(source, date);
+        """
+    )
+
+    # --- receipt_line_items ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS receipt_line_items (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_id   INTEGER NOT NULL,
+            line_index   INTEGER NOT NULL,
+            item_id      INTEGER,
+            description  TEXT,
+            quantity     REAL,
+            unit_price   REAL,
+            line_total   REAL,
+            discount     REAL,
+            confidence   INTEGER,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (receipt_id) REFERENCES receipts(id) ON DELETE CASCADE,
+            FOREIGN KEY (item_id)    REFERENCES items(id)    ON DELETE SET NULL
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_receipt_line_items_receipt_id
+        ON receipt_line_items(receipt_id);
+        """
+    )
+
     # --- Fuzzy matching ---
     cur.execute(
-	"""
-	CREATE TABLE IF NOT EXISTS item_aliases (
-    	    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    	    alias_text TEXT NOT NULL UNIQUE,
-    	    item_id INTEGER NOT NULL,
-    	    confidence REAL NOT NULL DEFAULT 1.0,
-    	    source TEXT NOT NULL DEFAULT 'manual',
-    	    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    	    last_seen_at TEXT,
-    	    times_seen INTEGER NOT NULL DEFAULT 0,
-    	    FOREIGN KEY(item_id) REFERENCES items(id)
-	);
-	"""
+        """
+        CREATE TABLE IF NOT EXISTS item_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alias_text TEXT NOT NULL UNIQUE,
+            item_id INTEGER NOT NULL,
+            confidence REAL NOT NULL DEFAULT 1.0,
+            source TEXT NOT NULL DEFAULT 'manual',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_seen_at TEXT,
+            times_seen INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(item_id) REFERENCES items(id)
+        );
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_item_aliases_item_id ON item_aliases(item_id);"
     )
 
     # --- shopping_list ---

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable, List, Optional
@@ -34,7 +35,11 @@ class PriceDropAlertsWindow(tk.Toplevel):
         ttk.Label(top, text="Receipt-based alerts (usual price + 6-month lows)", font=("Segoe UI", 11, "bold")).pack(
             side="left"
         )
-        ttk.Button(top, text="Refresh", command=self._refresh).pack(side="right")
+        self._refresh_btn = ttk.Button(top, text="Refresh", command=self._refresh)
+        self._refresh_btn.pack(side="right")
+
+        self._status_var = tk.StringVar(value="")
+        ttk.Label(root, textvariable=self._status_var, foreground="#666").pack(anchor="w", pady=(0, 4))
 
         note = ttk.Label(
             root,
@@ -90,8 +95,27 @@ class PriceDropAlertsWindow(tk.Toplevel):
         self._soft_label.pack(anchor="w", pady=(6, 0))
 
     def _refresh(self) -> None:
-        self._alerts = self._svc.get_alerts(limit=250)
+        self._refresh_btn.config(state="disabled")
+        self._status_var.set("Loading alerts…")
+        self.tree.delete(*self.tree.get_children())
 
+        def worker():
+            try:
+                alerts = self._svc.get_alerts(limit=250)
+                self.after(0, lambda: self._populate(alerts, None))
+            except Exception as exc:
+                self.after(0, lambda: self._populate(None, exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _populate(self, alerts, error) -> None:
+        self._refresh_btn.config(state="normal")
+        if error is not None:
+            self._status_var.set(f"Error: {error}")
+            return
+
+        self._alerts = alerts
+        self._status_var.set(f"{len(self._alerts)} alert(s) loaded.")
         self.tree.delete(*self.tree.get_children())
         for idx, a in enumerate(self._alerts):
             item_label = a.item_name

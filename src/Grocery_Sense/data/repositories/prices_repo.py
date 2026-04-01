@@ -442,3 +442,181 @@ def get_best_current_quote_for_item_store(
         return {"unit_price": float(latest.unit_price), "source": latest.source or "latest"}
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Batch query helpers — replace N+1 loops with single SQL round-trips
+# ---------------------------------------------------------------------------
+
+def _price_cols() -> str:
+    """Column list used by all batch SELECT statements (matches PricePoint field order)."""
+    return (
+        "id, item_id, store_id, receipt_id, flyer_source_id, source, date, "
+        "unit_price, unit, quantity, total_price, raw_name, confidence"
+    )
+
+
+def _row_to_price_point(r) -> PricePoint:
+    return PricePoint(
+        id=r[0], item_id=r[1], store_id=r[2], receipt_id=r[3],
+        flyer_source_id=r[4], source=r[5], date=r[6],
+        unit_price=r[7], unit=r[8], quantity=r[9],
+        total_price=r[10], raw_name=r[11], confidence=r[12],
+    )
+
+
+def get_most_recent_prices_by_store_batch(
+    item_ids: List[int],
+    store_ids: List[int],
+) -> Dict[Tuple[int, int], PricePoint]:
+    """Return the most recent PricePoint per (item_id, store_id) in a single query.
+
+    Replaces N×M calls to get_most_recent_price(item_id, store_id=store_id).
+    Returns {(item_id, store_id): PricePoint}.
+    """
+    if not item_ids or not store_ids:
+        return {}
+
+    item_csv = ",".join(str(int(x)) for x in item_ids)
+    store_csv = ",".join(str(int(x)) for x in store_ids)
+
+    sql = f"""
+        SELECT {_price_cols()}
+        FROM (
+            SELECT {_price_cols()},
+                   ROW_NUMBER() OVER (
+                       PARTITION BY item_id, store_id
+                       ORDER BY date DESC, id DESC
+                   ) AS rn
+            FROM prices
+            WHERE item_id  IN ({item_csv})
+              AND store_id IN ({store_csv})
+              AND unit_price IS NOT NULL
+        ) WHERE rn = 1
+    """
+
+    out: Dict[Tuple[int, int], PricePoint] = {}
+    with closing(get_connection()) as conn:
+        for r in conn.execute(sql).fetchall():
+            pp = _row_to_price_point(r)
+            out[(pp.item_id, pp.store_id)] = pp
+    return out
+
+
+def get_most_recent_prices_global_batch(
+    item_ids: List[int],
+) -> Dict[int, PricePoint]:
+    """Return the most recent PricePoint per item_id (across all stores) in a single query.
+
+    Replaces N calls to get_most_recent_price(item_id, store_id=None).
+    Returns {item_id: PricePoint}.
+    """
+    if not item_ids:
+        return {}
+
+    item_csv = ",".join(str(int(x)) for x in item_ids)
+
+    sql = f"""
+        SELECT {_price_cols()}
+        FROM (
+            SELECT {_price_cols()},
+                   ROW_NUMBER() OVER (
+                       PARTITION BY item_id
+                       ORDER BY date DESC, id DESC
+                   ) AS rn
+            FROM prices
+            WHERE item_id IN ({item_csv})
+              AND unit_price IS NOT NULL
+        ) WHERE rn = 1
+    """
+
+    out: Dict[int, PricePoint] = {}
+    with closing(get_connection()) as conn:
+        for r in conn.execute(sql).fetchall():
+            pp = _row_to_price_point(r)
+            out[pp.item_id] = pp
+    return out
+
+
+def get_active_flyer_prices_batch(
+    item_ids: List[int],
+    store_ids: List[int],
+) -> Dict[Tuple[int, int], Dict[str, Any]]:
+    """Return the lowest active flyer unit_price per (item_id, store_id) in a single query.
+
+    Replaces N×M calls to get_active_flyer_unit_price(item_id, store_id).
+    Returns {(item_id, store_id): {"unit_price": float, "source": "flyer"}}.
+    """
+    if not item_ids or not store_ids:
+        return {}
+
+    item_csv = ",".join(str(int(x)) for x in item_ids)
+    store_csv = ",".join(str(int(x)) for x in store_ids)
+
+    sql = f"""
+        SELECT p.item_id, p.store_id, MIN(p.unit_price) AS unit_price
+        FROM prices p
+        JOIN flyer_sources fs ON fs.id = p.flyer_source_id
+        WHERE p.source      = 'flyer'
+          AND p.item_id  IN ({item_csv})
+          AND p.store_id IN ({store_csv})
+          AND p.unit_price IS NOT NULL
+          AND date(fs.valid_from) <= date('now')
+          AND date(fs.valid_to)   >= date('now')
+        GROUP BY p.item_id, p.store_id
+    """
+
+    out: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    try:
+        with closing(get_connection()) as conn:
+            for r in conn.execute(sql).fetchall():
+                item_id = int(r[0])
+                store_id = int(r[1])
+                unit_price = float(r[2])
+                out[(item_id, store_id)] = {"unit_price": unit_price, "source": "flyer"}
+    except Exception:
+        pass
+    return out
+
+
+def get_price_stats_batch(
+    item_ids: List[int],
+    since_days: int = 180,
+) -> Dict[int, PriceStats]:
+    """Return PriceStats per item_id in a single query.
+
+    Replaces N calls to get_price_stats_for_item(item_id, since_days=...).
+    Returns {item_id: PriceStats}. Items with no history are omitted.
+    """
+    if not item_ids:
+        return {}
+
+    item_csv = ",".join(str(int(x)) for x in item_ids)
+
+    sql = f"""
+        SELECT
+            item_id,
+            MIN(unit_price) AS min_price,
+            MAX(unit_price) AS max_price,
+            AVG(unit_price) AS avg_price,
+            COUNT(*)        AS cnt
+        FROM prices
+        WHERE item_id IN ({item_csv})
+          AND unit_price IS NOT NULL
+          AND date(COALESCE(date, created_at)) >= date('now', '{_since_clause(since_days)}')
+        GROUP BY item_id
+    """
+
+    out: Dict[int, PriceStats] = {}
+    with closing(get_connection()) as conn:
+        for r in conn.execute(sql).fetchall():
+            item_id = int(r[0])
+            out[item_id] = PriceStats(
+                item_id=item_id,
+                store_id=None,
+                min_price=float(r[1]),
+                max_price=float(r[2]),
+                avg_price=float(r[3]),
+                count=int(r[4]),
+            )
+    return out

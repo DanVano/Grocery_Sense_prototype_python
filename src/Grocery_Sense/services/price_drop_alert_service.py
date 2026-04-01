@@ -5,8 +5,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from Grocery_Sense import config_store
-from Grocery_Sense.data.repositories import items_repo, prices_repo, stores_repo
+from Grocery_Sense.data.connection import get_db_path as _get_db_path
+from Grocery_Sense.data.repositories import stores_repo, prices_repo
+from Grocery_Sense.data.repositories.items_repo import get_items_by_ids
+from Grocery_Sense.data.repositories.prices_repo import (
+    get_active_flyer_prices_batch,
+    get_most_recent_prices_by_store_batch,
+    get_most_recent_prices_global_batch,
+)
 
 
 @dataclass(frozen=True)
@@ -41,7 +47,7 @@ class PriceDropAlertService:
     MIN_RECEIPT_SAMPLES_FOR_USUAL = 4
 
     def __init__(self, *, db_path: Optional[str] = None, log=None) -> None:
-        self._db_path = db_path or config_store.get_db_path()
+        self._db_path = db_path or str(_get_db_path())
         self._log = log
         self._ensure_tables()
 
@@ -77,22 +83,36 @@ class PriceDropAlertService:
 
         # For now: staple-driven scope (keeps alerts high signal)
         item_ids = list(staple_item_ids.keys())
+        store_ids = [s.id for s in stores]
+        store_name_map: Dict[int, str] = {s.id: s.name for s in stores}
+
+        # --- Batch-load all price data upfront (4 queries total, 0 per-item) ---
+        items_map = get_items_by_ids(item_ids)
+        flyer_quotes = get_active_flyer_prices_batch(item_ids, store_ids)
+        store_quotes = get_most_recent_prices_by_store_batch(item_ids, store_ids)
+        global_quotes = get_most_recent_prices_global_batch(item_ids)
 
         out: List[Dict[str, Any]] = []
 
         for item_id in item_ids:
-            item = items_repo.get_item_by_id(item_id)
+            item = items_map.get(item_id)
             if not item:
                 continue
 
-            # Find the best "current" quote (lowest across stores)
+            # Find the best "current" quote (lowest across stores) from in-memory dicts
             best_store_id: Optional[int] = None
             best_store_name: str = ""
             best_unit: Optional[float] = None
             best_source: str = "unknown"
 
             for s in stores:
-                q = prices_repo.get_best_current_quote_for_item_store(item_id, s.id)
+                # Prefer active flyer price; fall back to most recent store history
+                q = flyer_quotes.get((item_id, s.id))
+                if q is None:
+                    pr = store_quotes.get((item_id, s.id))
+                    if pr and pr.unit_price is not None and pr.unit_price > 0:
+                        q = {"unit_price": float(pr.unit_price), "source": pr.source or "latest"}
+
                 if not q:
                     continue
                 unit = q.get("unit_price")
@@ -106,12 +126,11 @@ class PriceDropAlertService:
 
             # Fallback: global most recent price (estimate)
             if best_unit is None:
-                global_latest = prices_repo.get_most_recent_price(item_id)
+                global_latest = global_quotes.get(item_id)
                 if global_latest and global_latest.unit_price is not None and float(global_latest.unit_price) > 0:
                     best_unit = float(global_latest.unit_price)
                     best_store_id = int(global_latest.store_id or 0)
-                    store = stores_repo.get_store_by_id(best_store_id) if best_store_id else None
-                    best_store_name = store.name if store else "Unknown"
+                    best_store_name = store_name_map.get(best_store_id, "Unknown")
                     best_source = str(global_latest.source or "global_latest")
 
             if best_unit is None or best_unit <= 0:
@@ -173,7 +192,7 @@ class PriceDropAlertService:
             is_staple = 1 if (receipt_count >= 3 or line_count >= 4) else 0
 
             notes = self._build_notes(
-                item_name=str(item.name),
+                item_name=str(item.canonical_name),
                 store_name=best_store_name,
                 current=best_unit,
                 usual=usual_price,
@@ -190,7 +209,7 @@ class PriceDropAlertService:
             out.append(
                 {
                     "item_id": int(item_id),
-                    "item_name": str(item.name),
+                    "item_name": str(item.canonical_name),
                     "store_id": int(best_store_id or 0),
                     "store_name": best_store_name,
                     "current_price": float(best_unit),
@@ -276,6 +295,12 @@ class PriceDropAlertService:
 
             dismissed_keys = self._load_recent_dismissed_keys(conn)
 
+            # Batch-load items and stores for all rows upfront
+            unique_item_ids = [int(r["item_id"]) for r in rows if r["item_id"] is not None]
+            items_map = get_items_by_ids(unique_item_ids)
+            all_stores = stores_repo.list_stores()
+            store_name_map: Dict[int, str] = {s.id: s.name for s in all_stores}
+
             for r in rows:
                 item_id = int(r["item_id"])
                 store_id = int(r["store_id"] or 0)
@@ -283,12 +308,11 @@ class PriceDropAlertService:
                 if paid <= 0:
                     continue
 
-                item = items_repo.get_item_by_id(item_id)
+                item = items_map.get(item_id)
                 if not item:
                     continue
 
-                store = stores_repo.get_store_by_id(store_id) if store_id else None
-                store_name = store.name if store else "Unknown"
+                store_name = store_name_map.get(store_id, "Unknown")
 
                 usual, samples, basis = prices_repo.get_usual_unit_price(
                     item_id,
@@ -315,7 +339,7 @@ class PriceDropAlertService:
                     continue
 
                 notes = self._build_notes(
-                    item_name=str(item.name),
+                    item_name=str(item.canonical_name),
                     store_name=store_name,
                     current=paid,
                     usual=usual,
@@ -341,7 +365,7 @@ class PriceDropAlertService:
                         item_id,
                         store_id,
                         store_name,
-                        str(item.name),
+                        str(item.canonical_name),
                         float(paid),
                         float(usual),
                         float(pct_below),

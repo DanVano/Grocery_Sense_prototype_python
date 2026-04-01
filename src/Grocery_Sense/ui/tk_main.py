@@ -20,6 +20,7 @@ Main menu:
 
 from __future__ import annotations
 
+import threading
 import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -434,11 +435,11 @@ class GrocerySenseApp(tk.Tk):
         top_frame.grid_columnconfigure(1, weight=1)
         top_frame.grid_rowconfigure(1, weight=1)
 
-        suggestions = self.meal_suggestion_service.suggest_meals_for_week(max_recipes=10)
-
-        for s in suggestions:
-            name = s.recipe.get("name") or s.recipe.get("title") or "Recipe"
-            listbox.insert(tk.END, name)
+        suggestions = []
+        status_var = tk.StringVar(value="Loading meal suggestions…")
+        ttk.Label(top_frame, textvariable=status_var, foreground="#888").grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
 
         def on_select(_evt):
             idxs = listbox.curselection()
@@ -449,6 +450,25 @@ class GrocerySenseApp(tk.Tk):
             details.insert(tk.END, explain_suggested_meal(s))
 
         listbox.bind("<<ListboxSelect>>", on_select)
+
+        def worker():
+            try:
+                results = self.meal_suggestion_service.suggest_meals_for_week(max_recipes=10)
+                win.after(0, lambda: _populate(results, None))
+            except Exception as exc:
+                win.after(0, lambda: _populate(None, exc))
+
+        def _populate(results, error):
+            if error is not None:
+                status_var.set(f"Error: {error}")
+                return
+            suggestions.extend(results)
+            for s in suggestions:
+                name = s.recipe.get("name") or s.recipe.get("title") or "Recipe"
+                listbox.insert(tk.END, name)
+            status_var.set(f"{len(suggestions)} suggestion(s) loaded.")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Weekly Plan
@@ -466,32 +486,49 @@ class GrocerySenseApp(tk.Tk):
         summary_box = ScrolledText(win, state=tk.NORMAL)
         summary_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
+        build_btn = ttk.Button(win, text="Build Weekly Plan", width=22)
+        build_btn.pack(side=tk.BOTTOM, pady=8)
+
         def build_plan():
             summary_box.delete("1.0", tk.END)
+            summary_box.insert(tk.END, "Building weekly plan…\n")
+            build_btn.config(state="disabled")
             self._log("Building weekly plan (6 recipes, added to shopping list)...")
 
-            plan = self.weekly_planner_service.build_weekly_plan(
-                num_recipes=6,
-                persist_to_shopping_list=True,
-                planned_store_id=None,
-                added_by="weekly_planner_ui",
-            )
+            def worker():
+                try:
+                    plan = self.weekly_planner_service.build_weekly_plan(
+                        num_recipes=6,
+                        persist_to_shopping_list=True,
+                        planned_store_id=None,
+                        added_by="weekly_planner_ui",
+                    )
+                    win.after(0, lambda: _populate(plan, None))
+                except Exception as exc:
+                    win.after(0, lambda: _populate(None, exc))
 
-            for line in summarize_weekly_plan(plan):
-                summary_box.insert(tk.END, line + "\n")
+            def _populate(plan, error):
+                build_btn.config(state="normal")
+                summary_box.delete("1.0", tk.END)
+                if error is not None:
+                    summary_box.insert(tk.END, f"Error: {error}\n")
+                    self._log(f"Weekly plan error: {error}")
+                    return
 
-            summary_box.insert(tk.END, "\nIngredients:\n")
-            for ing in plan.planned_ingredients:
-                mapped = "" if ing.item_id is None else f" item_id={ing.item_id} ({ing.match_confidence or 0:.2f})"
-                summary_box.insert(
-                    tk.END,
-                    f" - {ing.name} (in {ing.approximate_count} recipes){mapped}\n",
-                )
+                for line in summarize_weekly_plan(plan):
+                    summary_box.insert(tk.END, line + "\n")
 
-        ttk.Button(win, text="Build Weekly Plan", command=self._safe_call(build_plan)).pack(
-            side=tk.BOTTOM, pady=8
-        )
+                summary_box.insert(tk.END, "\nIngredients:\n")
+                for ing in plan.planned_ingredients:
+                    mapped = "" if ing.item_id is None else f" item_id={ing.item_id} ({ing.match_confidence or 0:.2f})"
+                    summary_box.insert(
+                        tk.END,
+                        f" - {ing.name} (in {ing.approximate_count} recipes){mapped}\n",
+                    )
 
+            threading.Thread(target=worker, daemon=True).start()
+
+        build_btn.config(command=self._safe_call(build_plan))
         build_plan()
 
     # ------------------------------------------------------------------

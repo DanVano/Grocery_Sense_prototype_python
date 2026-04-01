@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Repos (DB)
 from Grocery_Sense.data.repositories import shopping_list_repo, stores_repo, prices_repo
+from Grocery_Sense.data.repositories.prices_repo import (
+    get_most_recent_prices_by_store_batch,
+    get_most_recent_prices_global_batch,
+    get_price_stats_batch,
+)
 
 # Preferences (optional; code fails-safe if not present)
 try:
@@ -210,38 +215,48 @@ class BasketOptimizerService:
             if eff is not None:
                 self._apply_preference_annotations(plan, eff, safe_phrases)
 
-            # stats for savings lines (avg + min over 180 days)
-            stats = prices_repo.get_price_stats_for_item(item_id, days=180)
-            if stats:
-                plan.usual_avg_unit_price_180d = stats.avg_price
-                plan.lowest_unit_price_180d = stats.min_price
-
             normalized.append(plan)
 
         if not normalized:
             result.warnings.append("No optimizable items found (missing item_id on shopping list entries).")
             return result
 
+        all_item_ids = [p.item_id for p in normalized]
+
+        # Batch-load stats for savings lines (avg + min over 180 days) — 1 query
+        stats_map = get_price_stats_batch(all_item_ids, since_days=180)
+        for plan in normalized:
+            s = stats_map.get(plan.item_id)
+            if s and s.count > 0:
+                plan.usual_avg_unit_price_180d = s.avg_price
+                plan.lowest_unit_price_180d = s.min_price
+
         # Estimate per-store unit prices for each item
         store_map: Dict[int, str] = {s.id: s.name for s in stores}
+        all_store_ids = list(store_map.keys())
 
-        # Build flyer map (best unit_price per (store_id,item_id)) from prices + flyer_sources (if present)
+        # 1 query: active flyer prices
         flyer_map = self._load_active_flyer_unit_prices(
-            item_ids=[p.item_id for p in normalized],
-            store_ids=list(store_map.keys()),
+            item_ids=all_item_ids,
+            store_ids=all_store_ids,
         )
 
-        # Per-store price matrix
+        # 2 queries (batch): most-recent per (item, store) + global any-store fallback
+        store_history = get_most_recent_prices_by_store_batch(all_item_ids, all_store_ids)
+        global_history = get_most_recent_prices_global_batch(all_item_ids)
+
+        # Build price matrix from in-memory dicts — 0 extra DB calls
         price_matrix: Dict[Tuple[int, int], PricePick] = {}
         for store_id, store_name in store_map.items():
             for p in normalized:
-                pick = self._pick_price_for_item_store(
+                price_matrix[(store_id, p.item_id)] = self._pick_price_from_maps(
                     item_id=p.item_id,
                     store_id=store_id,
                     store_name=store_name,
                     flyer_map=flyer_map,
+                    store_history=store_history,
+                    global_history=global_history,
                 )
-                price_matrix[(store_id, p.item_id)] = pick
 
         # Choose best store(s)
         if mode == "one_store":
@@ -369,6 +384,47 @@ class BasketOptimizerService:
     # Price selection helpers
     # ---------------------------------------------------------------------
 
+    def _pick_price_from_maps(
+        self,
+        *,
+        item_id: int,
+        store_id: int,
+        store_name: str,
+        flyer_map: Dict[Tuple[int, int], Tuple[float, str]],
+        store_history: Dict[Tuple[int, int], Any],
+        global_history: Dict[int, Any],
+    ) -> PricePick:
+        """In-memory version of _pick_price_for_item_store — no DB calls."""
+        # 1) Active flyer price
+        flyer = flyer_map.get((store_id, item_id))
+        if flyer:
+            unit_price, unit = flyer
+            return PricePick(store_id=store_id, store_name=store_name,
+                             unit_price=unit_price, unit=unit, source="flyer")
+
+        # 2) Most recent store-specific history
+        pr = store_history.get((item_id, store_id))
+        if pr and getattr(pr, "unit_price", None) is not None:
+            return PricePick(
+                store_id=store_id, store_name=store_name,
+                unit_price=float(pr.unit_price),
+                unit=str(getattr(pr, "unit", None) or "each").strip().lower(),
+                source="history_store",
+            )
+
+        # 3) Global any-store fallback
+        pr2 = global_history.get(item_id)
+        if pr2 and getattr(pr2, "unit_price", None) is not None:
+            return PricePick(
+                store_id=store_id, store_name=store_name,
+                unit_price=float(pr2.unit_price),
+                unit=str(getattr(pr2, "unit", None) or "each").strip().lower(),
+                source="history_any",
+            )
+
+        return PricePick(store_id=store_id, store_name=store_name,
+                         unit_price=None, unit="each", source="unknown")
+
     def _pick_price_for_item_store(
         self,
         *,
@@ -420,8 +476,6 @@ class BasketOptimizerService:
             unit="each",
             source="unknown",
         )
-
-        return PricePick(store_id=store_id, store_name=store_name, unit_price=None, unit="each", source="unknown")
 
     def _best_store_for_item(
         self,
@@ -600,7 +654,7 @@ class BasketOptimizerService:
         """
         # If the schema/table isn't present yet, fail-safe.
         try:
-            from Grocery_Sense.data.repositories.connection import get_connection
+            from Grocery_Sense.data.connection import get_connection
         except Exception:
             return {}
 
