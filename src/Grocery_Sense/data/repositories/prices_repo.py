@@ -331,6 +331,180 @@ def get_last_seen_at_or_below(
         return str(row[0]) if row and row[0] else None
 
 
+def get_usual_unit_price_batch(
+    item_ids: List[int],
+    *,
+    receipt_only: bool = True,
+    min_samples: int = 4,
+    since_days: int = 180,
+) -> Dict[int, Tuple[Optional[float], int, str]]:
+    """
+    Batch version of get_usual_unit_price.
+
+    Returns {item_id: (usual_price, sample_count, basis)} for all item_ids.
+
+    Single query fetches all prices (both receipt and non-receipt) for the
+    full item set. Python then applies the same median + fallback logic as the
+    single-item version, with zero extra DB round-trips.
+    """
+    if not item_ids:
+        return {}
+
+    id_csv = ",".join(str(int(x)) for x in item_ids)
+    since = _since_clause(since_days)
+
+    sql = f"""
+        SELECT
+            item_id,
+            unit_price,
+            CASE WHEN (source = 'receipt' OR receipt_id IS NOT NULL) THEN 1 ELSE 0 END AS is_receipt
+        FROM prices
+        WHERE item_id IN ({id_csv})
+          AND unit_price IS NOT NULL
+          AND unit_price > 0
+          AND date(COALESCE(date, created_at)) >= date('now', ?)
+        ORDER BY item_id
+    """
+
+    receipt_rows: Dict[int, List[float]] = {iid: [] for iid in item_ids}
+    all_rows: Dict[int, List[float]] = {iid: [] for iid in item_ids}
+
+    with closing(get_connection()) as conn:
+        for row in conn.execute(sql, (since,)).fetchall():
+            try:
+                iid = int(row[0])
+                price = float(row[1])
+                is_receipt = int(row[2])
+            except Exception:
+                continue
+            if iid in all_rows:
+                all_rows[iid].append(price)
+                if is_receipt:
+                    receipt_rows[iid].append(price)
+
+    out: Dict[int, Tuple[Optional[float], int, str]] = {}
+    for iid in item_ids:
+        r_prices = receipt_rows[iid]
+        a_prices = all_rows[iid]
+
+        if len(r_prices) >= min_samples:
+            out[iid] = (_median(r_prices), len(r_prices), "receipt_median")
+        elif receipt_only and a_prices:
+            out[iid] = (_median(a_prices), len(a_prices), "estimated_median")
+        else:
+            out[iid] = (None, len(r_prices), "unknown")
+
+    return out
+
+
+def get_six_month_low_batch(
+    item_ids: List[int],
+    *,
+    since_days: int = 183,
+) -> Dict[int, Tuple[Optional[float], Optional[str]]]:
+    """
+    Batch version of get_six_month_low_unit_price.
+
+    Returns {item_id: (lowest_unit_price, when_iso)}.
+    Uses a window function to find the minimum price row per item in one query.
+    """
+    if not item_ids:
+        return {}
+
+    id_csv = ",".join(str(int(x)) for x in item_ids)
+    since = _since_clause(since_days)
+
+    sql = f"""
+        SELECT item_id, unit_price, when_iso
+        FROM (
+            SELECT
+                item_id,
+                unit_price,
+                COALESCE(date, created_at) AS when_iso,
+                ROW_NUMBER() OVER (
+                    PARTITION BY item_id
+                    ORDER BY unit_price ASC, COALESCE(date, created_at) ASC
+                ) AS rn
+            FROM prices
+            WHERE item_id IN ({id_csv})
+              AND unit_price IS NOT NULL
+              AND unit_price > 0
+              AND date(COALESCE(date, created_at)) >= date('now', ?)
+        )
+        WHERE rn = 1
+    """
+
+    out: Dict[int, Tuple[Optional[float], Optional[str]]] = {iid: (None, None) for iid in item_ids}
+
+    with closing(get_connection()) as conn:
+        for row in conn.execute(sql, (since,)).fetchall():
+            try:
+                iid = int(row[0])
+                price = float(row[1])
+                when = str(row[2]) if row[2] else None
+            except Exception:
+                continue
+            if iid in out:
+                out[iid] = (price, when)
+
+    return out
+
+
+def get_last_seen_at_or_below_batch(
+    item_id_to_ceiling: Dict[int, float],
+    *,
+    since_days: int = 183,
+) -> Dict[int, Optional[str]]:
+    """
+    Batch version of get_last_seen_at_or_below.
+
+    item_id_to_ceiling: {item_id: price_ceiling} — each item may have a
+    different ceiling (typically its current best price).
+
+    Returns {item_id: most_recent_date_iso_or_None}.
+
+    Fetches all candidate rows in one query, then filters by per-item ceiling
+    in Python to avoid a variable-per-row WHERE clause.
+    """
+    if not item_id_to_ceiling:
+        return {}
+
+    id_csv = ",".join(str(int(x)) for x in item_id_to_ceiling)
+    since = _since_clause(since_days)
+
+    sql = f"""
+        SELECT item_id, unit_price, COALESCE(date, created_at) AS when_iso
+        FROM prices
+        WHERE item_id IN ({id_csv})
+          AND unit_price IS NOT NULL
+          AND unit_price > 0
+          AND date(COALESCE(date, created_at)) >= date('now', ?)
+        ORDER BY item_id, when_iso DESC
+    """
+
+    # For each item, we want the most recent date where price <= ceiling.
+    # Rows are already ordered DESC by date, so the first qualifying row per item wins.
+    out: Dict[int, Optional[str]] = {iid: None for iid in item_id_to_ceiling}
+    seen: set = set()
+
+    with closing(get_connection()) as conn:
+        for row in conn.execute(sql, (since,)).fetchall():
+            try:
+                iid = int(row[0])
+                price = float(row[1])
+                when = str(row[2]) if row[2] else None
+            except Exception:
+                continue
+            if iid in seen:
+                continue
+            ceiling = item_id_to_ceiling.get(iid)
+            if ceiling is not None and price <= float(ceiling):
+                out[iid] = when
+                seen.add(iid)
+
+    return out
+
+
 def get_active_flyer_unit_price(
     item_id: int,
     store_id: int,

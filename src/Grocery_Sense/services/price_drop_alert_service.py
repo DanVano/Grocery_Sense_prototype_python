@@ -12,6 +12,9 @@ from Grocery_Sense.data.repositories.prices_repo import (
     get_active_flyer_prices_batch,
     get_most_recent_prices_by_store_batch,
     get_most_recent_prices_global_batch,
+    get_usual_unit_price_batch,
+    get_six_month_low_batch,
+    get_last_seen_at_or_below_batch,
 )
 
 
@@ -86,33 +89,36 @@ class PriceDropAlertService:
         store_ids = [s.id for s in stores]
         store_name_map: Dict[int, str] = {s.id: s.name for s in stores}
 
-        # --- Batch-load all price data upfront (4 queries total, 0 per-item) ---
+        # --- Batch-load all price data upfront (6 queries total, 0 per-item) ---
         items_map = get_items_by_ids(item_ids)
         flyer_quotes = get_active_flyer_prices_batch(item_ids, store_ids)
         store_quotes = get_most_recent_prices_by_store_batch(item_ids, store_ids)
         global_quotes = get_most_recent_prices_global_batch(item_ids)
+        usual_map = get_usual_unit_price_batch(
+            item_ids,
+            receipt_only=True,
+            min_samples=self.MIN_RECEIPT_SAMPLES_FOR_USUAL,
+            since_days=self.USUAL_LOOKBACK_DAYS,
+        )
+        six_low_map = get_six_month_low_batch(item_ids, since_days=self.LOW_LOOKBACK_DAYS)
 
-        out: List[Dict[str, Any]] = []
+        # First pass: resolve best current price per item and identify near-low items
+        # so we can batch the last-seen-at-or-below query.
+        best_prices: Dict[int, Tuple[float, int, str, str]] = {}  # item_id -> (price, store_id, store_name, source)
+        near_low_ceilings: Dict[int, float] = {}  # item_id -> best_unit (for batch query)
 
         for item_id in item_ids:
-            item = items_map.get(item_id)
-            if not item:
-                continue
-
-            # Find the best "current" quote (lowest across stores) from in-memory dicts
             best_store_id: Optional[int] = None
             best_store_name: str = ""
             best_unit: Optional[float] = None
             best_source: str = "unknown"
 
             for s in stores:
-                # Prefer active flyer price; fall back to most recent store history
                 q = flyer_quotes.get((item_id, s.id))
                 if q is None:
                     pr = store_quotes.get((item_id, s.id))
                     if pr and pr.unit_price is not None and pr.unit_price > 0:
                         q = {"unit_price": float(pr.unit_price), "source": pr.source or "latest"}
-
                 if not q:
                     continue
                 unit = q.get("unit_price")
@@ -124,7 +130,6 @@ class PriceDropAlertService:
                     best_store_name = str(s.name)
                     best_source = str(q.get("source") or "latest")
 
-            # Fallback: global most recent price (estimate)
             if best_unit is None:
                 global_latest = global_quotes.get(item_id)
                 if global_latest and global_latest.unit_price is not None and float(global_latest.unit_price) > 0:
@@ -134,23 +139,34 @@ class PriceDropAlertService:
                     best_source = str(global_latest.source or "global_latest")
 
             if best_unit is None or best_unit <= 0:
-                continue  # unknown current, no alert
+                continue
 
-            # Household "usual" (receipt median preferred)
-            usual_price, usual_samples, basis = prices_repo.get_usual_unit_price(
-                item_id,
-                store_id=None,
-                receipt_only=True,
-                min_samples=self.MIN_RECEIPT_SAMPLES_FOR_USUAL,
-                since_days=self.USUAL_LOOKBACK_DAYS,
-            )
+            best_prices[item_id] = (best_unit, best_store_id or 0, best_store_name, best_source)
 
-            # 6-month low (household overall)
-            six_low, six_low_when = prices_repo.get_six_month_low_unit_price(
-                item_id,
-                store_id=None,
-                since_days=self.LOW_LOOKBACK_DAYS,
-            )
+            six_low, _ = six_low_map.get(item_id, (None, None))
+            if six_low is not None and six_low > 0:
+                near_threshold = six_low * (1.0 + self.NEAR_SIX_MONTH_LOW_THRESHOLD_PCT / 100.0)
+                if best_unit <= near_threshold:
+                    near_low_ceilings[item_id] = best_unit
+
+        # Single batch query for all near-low cooldown checks
+        last_seen_map = get_last_seen_at_or_below_batch(
+            near_low_ceilings, since_days=self.LOW_LOOKBACK_DAYS
+        )
+
+        # Second pass: build alerts using fully pre-loaded data
+        out: List[Dict[str, Any]] = []
+
+        for item_id in item_ids:
+            if item_id not in best_prices:
+                continue
+            item = items_map.get(item_id)
+            if not item:
+                continue
+
+            best_unit, best_store_id, best_store_name, best_source = best_prices[item_id]
+            usual_price, usual_samples, basis = usual_map.get(item_id, (None, 0, "unknown"))
+            six_low, six_low_when = six_low_map.get(item_id, (None, None))
 
             pct_below_usual: Optional[float] = None
             if usual_price is not None and usual_price > 0:
@@ -160,23 +176,15 @@ class PriceDropAlertService:
             if six_low is not None and six_low > 0:
                 pct_above_low = ((best_unit - six_low) / six_low) * 100.0
 
-            # Stock-up: near 6-mo low AND last time at/under was >= cooldown days
-            last_seen_at_or_below: Optional[str] = None
+            last_seen_at_or_below = last_seen_map.get(item_id)
             stock_up_ok = False
-            if six_low is not None and six_low > 0:
-                near_low = best_unit <= (six_low * (1.0 + self.NEAR_SIX_MONTH_LOW_THRESHOLD_PCT / 100.0))
-                if near_low:
-                    last_seen_at_or_below = prices_repo.get_last_seen_at_or_below(
-                        item_id,
-                        store_id=None,
-                        price_ceiling=best_unit,
-                        since_days=self.LOW_LOOKBACK_DAYS,
-                    )
-                    stock_up_ok = self._passes_stockup_cooldown(last_seen_at_or_below)
+            if item_id in near_low_ceilings:
+                stock_up_ok = self._passes_stockup_cooldown(last_seen_at_or_below)
 
-            dropped_ok = False
-            if pct_below_usual is not None:
-                dropped_ok = pct_below_usual >= self.DROP_BELOW_USUAL_THRESHOLD_PCT
+            dropped_ok = (
+                pct_below_usual is not None
+                and pct_below_usual >= self.DROP_BELOW_USUAL_THRESHOLD_PCT
+            )
 
             if not dropped_ok and not stock_up_ok:
                 continue
@@ -210,7 +218,7 @@ class PriceDropAlertService:
                 {
                     "item_id": int(item_id),
                     "item_name": str(item.canonical_name),
-                    "store_id": int(best_store_id or 0),
+                    "store_id": int(best_store_id),
                     "store_name": best_store_name,
                     "current_price": float(best_unit),
                     "usual_price": float(usual_price) if usual_price is not None else None,
@@ -295,11 +303,18 @@ class PriceDropAlertService:
 
             dismissed_keys = self._load_recent_dismissed_keys(conn)
 
-            # Batch-load items and stores for all rows upfront
-            unique_item_ids = [int(r["item_id"]) for r in rows if r["item_id"] is not None]
+            # Batch-load all price stats upfront — 0 per-row queries
+            unique_item_ids = list({int(r["item_id"]) for r in rows if r["item_id"] is not None})
             items_map = get_items_by_ids(unique_item_ids)
             all_stores = stores_repo.list_stores()
             store_name_map: Dict[int, str] = {s.id: s.name for s in all_stores}
+            usual_map = get_usual_unit_price_batch(
+                unique_item_ids,
+                receipt_only=True,
+                min_samples=self.MIN_RECEIPT_SAMPLES_FOR_USUAL,
+                since_days=self.USUAL_LOOKBACK_DAYS,
+            )
+            six_low_map = get_six_month_low_batch(unique_item_ids, since_days=self.LOW_LOOKBACK_DAYS)
 
             for r in rows:
                 item_id = int(r["item_id"])
@@ -314,12 +329,7 @@ class PriceDropAlertService:
 
                 store_name = store_name_map.get(store_id, "Unknown")
 
-                usual, samples, basis = prices_repo.get_usual_unit_price(
-                    item_id,
-                    receipt_only=True,
-                    min_samples=self.MIN_RECEIPT_SAMPLES_FOR_USUAL,
-                    since_days=self.USUAL_LOOKBACK_DAYS,
-                )
+                usual, samples, basis = usual_map.get(item_id, (None, 0, "unknown"))
                 if usual is None or usual <= 0:
                     continue
 
@@ -327,10 +337,7 @@ class PriceDropAlertService:
                 if pct_below < self.DROP_BELOW_USUAL_THRESHOLD_PCT:
                     continue
 
-                six_low, six_low_when = prices_repo.get_six_month_low_unit_price(
-                    item_id,
-                    since_days=self.LOW_LOOKBACK_DAYS,
-                )
+                six_low, six_low_when = six_low_map.get(item_id, (None, None))
                 pct_above_low = ((paid - six_low) / six_low) * 100.0 if (six_low and six_low > 0) else None
 
                 kind = "below_usual"
