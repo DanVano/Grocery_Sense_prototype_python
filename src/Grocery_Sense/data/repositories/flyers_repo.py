@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import re
 import sqlite3
@@ -30,6 +31,7 @@ def _split_words(phrase: str) -> List[str]:
     return [w for w in re.split(r"\s+", phrase) if w]
 
 
+@functools.lru_cache(maxsize=2048)
 def _compile_phrase_regex(phrase: str) -> Optional[re.Pattern]:
     """
     Phrase-safe matcher:
