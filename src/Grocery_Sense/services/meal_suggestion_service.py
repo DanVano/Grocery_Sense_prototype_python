@@ -24,7 +24,7 @@ from Grocery_Sense.recipes.recipe_engine import (
     load_all_recipes,
     filter_recipes_by_ingredients_and_profile,
 )
-from Grocery_Sense.services.deals_service import Deal, search_deals
+from Grocery_Sense.services.deals_service import Deal
 
 
 # ---------------------------------------------------------------------------
@@ -244,19 +244,67 @@ def _collect_all_ingredients(recipes: Sequence[Dict[str, Any]]) -> List[str]:
 
 def _fetch_deals_for_ingredients(
     ingredients: Sequence[str],
-    max_age_days: int = 7,
 ) -> Dict[str, List[Deal]]:
     """
-    For each ingredient, call search_deals once and cache.
+    Query active flyer deals from the local DB (flyer_deals + flyer_batches).
+
+    Single query pulls all deals valid today; ingredient matching is done in
+    Python via substring search. No API calls — the Flipp client populates
+    these tables during the background flyer sync.
+
+    Tracked items (items.is_tracked = 1) could additionally be searched via
+    the live API, but that is deferred until the Flipp client is wired up.
     """
-    deals_by_ing: Dict[str, List[Deal]] = {}
+    import datetime as _dt
+    from Grocery_Sense.data.connection import get_connection
+
+    today = _dt.date.today().isoformat()
+
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    d.title,
+                    d.description,
+                    COALESCE(d.unit_price, d.norm_unit_price, d.deal_total) AS price,
+                    d.unit,
+                    s.name AS store_name
+                FROM flyer_deals d
+                JOIN flyer_batches b ON b.id = d.flyer_id
+                LEFT JOIN stores s ON s.id = d.store_id
+                WHERE b.status = 'active'
+                  AND b.valid_from <= ?
+                  AND b.valid_to   >= ?
+                """,
+                (today, today),
+            ).fetchall()
+    except Exception:
+        rows = []
+
+    # Build a flat list of (searchable_text, Deal) pairs once
+    local_deals: List[tuple] = []
+    for r in rows:
+        title = str(r["title"] or r["description"] or "").lower()
+        price_val = r["price"]
+        price = float(price_val) if price_val is not None else None
+        unit = str(r["unit"] or "each").strip()
+        store = str(r["store_name"] or "")
+        local_deals.append((
+            title,
+            Deal(name=title, store=store, price=price, unit=unit, raw={}),
+        ))
+
+    # Match each ingredient against deal titles in one pass per ingredient
+    out: Dict[str, List[Deal]] = {}
     for ing in ingredients:
-        try:
-            deals = search_deals(ing, max_age_days=max_age_days)
-        except Exception:
-            deals = []
-        deals_by_ing[ing.lower()] = deals
-    return deals_by_ing
+        ing_low = ing.lower().strip()
+        if not ing_low:
+            continue
+        matched = [deal for text, deal in local_deals if ing_low in text or text in ing_low]
+        out[ing_low] = matched
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +378,7 @@ class MealSuggestionService:
         if not filtered:
             return []
 
-        # 2) Fetch deals for ingredients across all candidate recipes
+        # 2) Load active flyer deals from local DB, matched to recipe ingredients
         all_ingredients = _collect_all_ingredients(filtered)
         deals_by_ingredient = _fetch_deals_for_ingredients(all_ingredients)
 

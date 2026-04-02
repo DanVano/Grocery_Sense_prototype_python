@@ -30,6 +30,7 @@ from Grocery_Sense.data.schema import initialize_database
 
 from Grocery_Sense.services.shopping_list_service import ShoppingListService
 from Grocery_Sense.services.meal_suggestion_service import MealSuggestionService
+from Grocery_Sense.services.flyer_sync_scheduler import FlyerSyncScheduler
 
 from Grocery_Sense.services.weekly_planner_service import (
     WeeklyPlannerService,
@@ -70,6 +71,13 @@ class GrocerySenseApp(tk.Tk):
         self._build_main_menu()
         self._build_log_panel()
         self._log("App started.")
+
+        # Start background flyer sync (twice-weekly) + post-sync alert check
+        self._flyer_scheduler = FlyerSyncScheduler(on_sync_complete=self._on_flyer_sync_done)
+        self._flyer_scheduler.start()
+
+        # Run price-drop alert check on startup
+        threading.Thread(target=self._check_price_drop_alerts, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Base UI helpers
@@ -201,6 +209,14 @@ class GrocerySenseApp(tk.Tk):
             frame,
             text="15) Seed Demo Data",
             command=self._safe_call(self._seed_demo_data),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
+        row += 1
+
+        ttk.Button(
+            frame,
+            text="16) Sync Flyers",
+            command=self._safe_call(self._manual_sync_flyers),
             width=35,
         ).grid(row=row, column=0, sticky="w", pady=2)
         row += 1
@@ -610,6 +626,61 @@ class GrocerySenseApp(tk.Tk):
         ttk.Button(header, text="Refresh", command=self._safe_call(render_plan)).pack(side=tk.RIGHT)
 
         render_plan()
+
+
+    # ------------------------------------------------------------------
+    # Flyer sync + price-drop alerts
+    # ------------------------------------------------------------------
+
+    def _manual_sync_flyers(self) -> None:
+        self._log("Flyer sync: manual sync requested…")
+        self._flyer_scheduler.request_sync()
+
+    def _on_flyer_sync_done(self, result) -> None:
+        """Called on the sync worker thread after every sync that ran."""
+        stores = getattr(result, "stores_synced", 0)
+        deals = getattr(result, "deals_inserted", 0)
+        errors = getattr(result, "errors", [])
+        self.after(0, lambda: self._log(
+            f"Flyer sync complete: {stores} store(s), {deals} deal(s) inserted."
+            + (f" Errors: {'; '.join(errors)}" if errors else "")
+        ))
+        # Run price-drop alert check after sync
+        threading.Thread(target=self._check_price_drop_alerts, daemon=True).start()
+
+    def _check_price_drop_alerts(self) -> None:
+        """Run on a worker thread; posts any alerts back to the main thread."""
+        try:
+            from Grocery_Sense.services.price_drop_alert_service import PriceDropAlertService
+            svc = PriceDropAlertService()
+            alerts = svc.compute_engine_alerts(staples_only=False)
+        except Exception as exc:
+            self.after(0, lambda: self._log(f"Price-drop alert check failed: {exc}"))
+            return
+
+        if not alerts:
+            return
+
+        def _show_alerts():
+            lines = []
+            for a in alerts[:10]:  # cap at 10 to avoid a huge popup
+                name = a.get("item_name") or a.get("canonical_name") or "Unknown item"
+                store = a.get("store_name") or ""
+                price = a.get("current_price")
+                price_str = f"${price:.2f}" if price is not None else "?"
+                lines.append(f"• {name}  {price_str}  @ {store}")
+
+            more = len(alerts) - 10
+            body = "\n".join(lines)
+            if more > 0:
+                body += f"\n… and {more} more."
+
+            messagebox.showinfo(
+                f"Price Drop Alerts ({len(alerts)})",
+                f"The following tracked items have dropped in price:\n\n{body}",
+            )
+
+        self.after(0, _show_alerts)
 
 
 def main() -> None:
