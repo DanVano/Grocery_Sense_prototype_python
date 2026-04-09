@@ -208,17 +208,20 @@ def create_tables(conn: sqlite3.Connection) -> None:
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS shopping_list (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_id          INTEGER,           -- nullable, we may not know canonical item yet
-            display_name     TEXT NOT NULL,     -- what user typed/spoke
-            quantity         REAL,
-            unit             TEXT,
-            planned_store_id INTEGER,           -- nullable
-            added_by         TEXT,
-            added_at         TEXT NOT NULL DEFAULT (datetime('now')),
-            is_checked_off   INTEGER NOT NULL DEFAULT 0,  -- 0/1
-            is_active        INTEGER NOT NULL DEFAULT 1,  -- 0/1
-            notes            TEXT,
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id             INTEGER,           -- nullable, we may not know canonical item yet
+            display_name        TEXT NOT NULL,     -- what user typed/spoke
+            quantity            REAL,
+            unit                TEXT,
+            category            TEXT,
+            planned_store_id    INTEGER,           -- nullable
+            added_by            TEXT,
+            added_by_member_id  INTEGER,           -- nullable FK to config member id
+            added_at            TEXT NOT NULL DEFAULT (datetime('now')),
+            is_checked_off      INTEGER NOT NULL DEFAULT 0,  -- 0/1
+            is_active           INTEGER NOT NULL DEFAULT 1,  -- 0/1
+            is_deleted          INTEGER NOT NULL DEFAULT 0,  -- soft-delete flag
+            notes               TEXT,
             FOREIGN KEY (item_id)          REFERENCES items(id)   ON DELETE SET NULL,
             FOREIGN KEY (planned_store_id) REFERENCES stores(id)  ON DELETE SET NULL
         );
@@ -271,6 +274,23 @@ def create_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply incremental migrations for columns added after the initial schema."""
+    cur = conn.cursor()
+    existing = {row[1] for row in cur.execute("PRAGMA table_info(shopping_list)").fetchall()}
+
+    migrations = [
+        ("category",           "ALTER TABLE shopping_list ADD COLUMN category TEXT"),
+        ("added_by_member_id", "ALTER TABLE shopping_list ADD COLUMN added_by_member_id INTEGER"),
+        ("is_deleted",         "ALTER TABLE shopping_list ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for col, sql in migrations:
+        if col not in existing:
+            cur.execute(sql)
+
+    conn.commit()
+
+
 def initialize_database(base_dir: Optional[Path] = None) -> None:
     """
     Convenience helper: open a connection, create tables, close it.
@@ -282,5 +302,6 @@ def initialize_database(base_dir: Optional[Path] = None) -> None:
     conn = get_connection(base_dir)
     try:
         create_tables(conn)
+        _migrate(conn)
     finally:
         conn.close()

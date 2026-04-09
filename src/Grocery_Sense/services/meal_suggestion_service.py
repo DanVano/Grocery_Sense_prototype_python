@@ -413,6 +413,7 @@ class MealSuggestionService:
                 SuggestedMeal(
                     recipe=r,
                     total_score=total,
+                    deal_score=0.0,
                     price_score=price_score,
                     preference_score=preference_score,
                     variety_score=variety_score,
@@ -480,4 +481,8 @@ def format_meal_explanation(
             lines.append(f" • {r}")
 
     return "\n".join(lines)
+
+
+# Alias for backward compatibility with existing tests
+explain_suggested_meal = format_meal_explanation
 

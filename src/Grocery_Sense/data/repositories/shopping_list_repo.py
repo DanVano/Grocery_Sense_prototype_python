@@ -35,16 +35,20 @@ def _row_to_obj(row) -> ShoppingListRow:
     )
 
 
-def list_active_items(*, store_id: Optional[int] = None) -> List[ShoppingListRow]:
+def list_active_items(
+    *, store_id: Optional[int] = None, include_checked_off: bool = False
+) -> List[ShoppingListRow]:
     """
-    Active + not deleted + not checked off items.
+    Active + not deleted items.
 
     If store_id is provided, filters by planned_store_id == store_id.
+    If include_checked_off is False (default), only returns unchecked items.
     """
+    checked_filter = "" if include_checked_off else "AND is_checked_off = 0"
     with get_connection() as conn:
         if store_id is None:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     id,
                     display_name,
@@ -57,13 +61,13 @@ def list_active_items(*, store_id: Optional[int] = None) -> List[ShoppingListRow
                     is_active,
                     planned_store_id
                 FROM shopping_list
-                WHERE is_active = 1 AND is_deleted = 0 AND is_checked_off = 0
+                WHERE is_active = 1 AND is_deleted = 0 {checked_filter}
                 ORDER BY id DESC
                 """
             ).fetchall()
         else:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     id,
                     display_name,
@@ -76,7 +80,7 @@ def list_active_items(*, store_id: Optional[int] = None) -> List[ShoppingListRow
                     is_active,
                     planned_store_id
                 FROM shopping_list
-                WHERE is_active = 1 AND is_deleted = 0 AND is_checked_off = 0
+                WHERE is_active = 1 AND is_deleted = 0 {checked_filter}
                   AND planned_store_id = ?
                 ORDER BY id DESC
                 """,
@@ -116,13 +120,16 @@ def add_item(
     unit: str = "",
     category: str = "",
     notes: str = "",
+    added_by: Optional[str] = None,
     added_by_member_id: Optional[int] = None,
+    planned_store_id: Optional[int] = None,
 ) -> int:
     with get_connection() as conn:
         cur = conn.execute(
             """
-            INSERT INTO shopping_list (display_name, quantity, unit, category, notes, added_by_member_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO shopping_list
+                (display_name, quantity, unit, category, notes, added_by, added_by_member_id, planned_store_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (display_name or "").strip(),
@@ -130,7 +137,9 @@ def add_item(
                 (unit or "").strip(),
                 (category or "").strip(),
                 (notes or "").strip(),
+                (added_by or "").strip() or None,
                 int(added_by_member_id) if added_by_member_id is not None else None,
+                int(planned_store_id) if planned_store_id is not None else None,
             ),
         )
         conn.commit()
@@ -155,6 +164,15 @@ def delete_item(item_id: int) -> None:
 def clear_all_items() -> None:
     with get_connection() as conn:
         conn.execute("UPDATE shopping_list SET is_deleted = 1")
+        conn.commit()
+
+
+def clear_checked_off_items() -> None:
+    """Mark only checked-off active items as deleted."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE shopping_list SET is_deleted = 1 WHERE is_checked_off = 1 AND is_active = 1"
+        )
         conn.commit()
 
 

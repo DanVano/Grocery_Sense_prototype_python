@@ -1,15 +1,16 @@
+"""
+Manual smoke test for IngredientMappingService.
+"""
+
 from Grocery_Sense.data.schema import initialize_database
-from Grocery_Sense.data.repositories.items_repo import ItemsRepo
+import Grocery_Sense.data.repositories.items_repo as items_repo_module
 from Grocery_Sense.services.ingredient_mapping_service import IngredientMappingService
+
 
 def main():
     initialize_database()
 
-    items = ItemsRepo()
-    # Ensure some baseline items exist in your DB for testing
-    # (insert chicken thighs / ground beef / basil etc using your repo methods)
-
-    mapper = IngredientMappingService(items_repo=items)
+    mapper = IngredientMappingService(items_repo=items_repo_module)
 
     samples = [
         "CHK THG BP SKLS",
@@ -23,6 +24,7 @@ def main():
         res = mapper.map_to_item(s)
         print("\nINPUT:", s)
         print(" ->", res)
+
 
 if __name__ == "__main__":
     main()

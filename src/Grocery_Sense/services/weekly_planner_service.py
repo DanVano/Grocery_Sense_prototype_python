@@ -102,6 +102,14 @@ class WeeklyPlannerService:
     ) -> None:
         self.meal_suggestion_service = meal_suggestion_service
         self.shopping_list_service = shopping_list_service
+        self._mapper = None
+
+    def _get_mapper(self):
+        if self._mapper is None:
+            from Grocery_Sense.data.repositories import items_repo as _items_repo
+            from Grocery_Sense.services.ingredient_mapping_service import IngredientMappingService
+            self._mapper = IngredientMappingService(items_repo=_items_repo)
+        return self._mapper
 
     def build_weekly_plan(
         self,
@@ -123,8 +131,9 @@ class WeeklyPlannerService:
 
         # ✅ best-effort mapping for each aggregated ingredient
         if map_ingredients:
+            mapper = self._get_mapper()
             for ing in planned_ingredients:
-                res = self.shopping_list_service.map_ingredient_name(ing.name)
+                res = mapper.map_to_item(ing.name)
                 if res and res.item_id:
                     ing.item_id = res.item_id
                     ing.canonical_name = res.canonical_name

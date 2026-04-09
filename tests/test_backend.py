@@ -14,8 +14,8 @@ This exercises:
 from __future__ import annotations
 
 from Grocery_Sense.data.schema import initialize_database
-from Grocery_Sense.data.stores_repo import create_store, list_stores
-from Grocery_Sense.services.shopping_list_service import ShoppingListService
+from Grocery_Sense.data.repositories.stores_repo import create_store, list_stores
+from Grocery_Sense.services import shopping_list_service as sl_svc
 
 
 def run_smoke_test() -> None:
@@ -60,37 +60,19 @@ def run_smoke_test() -> None:
     # -------------------------------------------------
     print("[4] Adding shopping list items...")
 
-    sl = ShoppingListService()
+    milk_id = sl_svc.add_item("Milk 2L", quantity=1.0, unit="each", notes="Test item: milk")
+    apples_id = sl_svc.add_item("Apples", quantity=6.0, unit="each", notes="Test item: apples")
 
-    milk = sl.add_item_simple(
-        display_name="Milk 2L",
-        qty=1.0,
-        unit="each",
-        planned_store_id=store.id,
-        notes="Test item: milk",
-        added_by="brain_smoke",
-    )
-    apples = sl.add_item_simple(
-        display_name="Apples",
-        qty=6.0,
-        unit="each",
-        planned_store_id=store.id,
-        notes="Test item: apples",
-        added_by="brain_smoke",
-    )
-
-    print("    ✔ Added items:")
-    print(milk)
-    print(apples)
+    print(f"    Added items with ids: {milk_id}, {apples_id}")
     print()
 
     # -------------------------------------------------
     # [5] List active shopping list items
     # -------------------------------------------------
     print("[5] Listing active shopping list items...")
-    active_items = sl.get_active_items(include_checked_off=False)
+    active_items = sl_svc.get_active_items()
     for item in active_items:
-        status = "✓" if item.is_checked_off else " "
+        status = "x" if item.is_checked_off else " "
         print(f" [{status}] ({item.id}) {item.display_name} x{item.quantity} {item.unit}")
     print()
 
@@ -100,12 +82,12 @@ def run_smoke_test() -> None:
     if active_items:
         first_id = active_items[0].id
         print(f"[6] Marking item {first_id} as checked off...")
-        sl.mark_item_checked(first_id, checked=True)
+        sl_svc.set_checked_off(first_id, True)
 
-        all_items = sl.get_active_items(include_checked_off=True)
+        all_items = sl_svc.get_all_items()
         print("    Items after check-off (including checked):")
         for item in all_items:
-            status = "✓" if item.is_checked_off else " "
+            status = "x" if item.is_checked_off else " "
             print(f" [{status}] ({item.id}) {item.display_name}")
         print()
     else:
@@ -115,12 +97,12 @@ def run_smoke_test() -> None:
     # [7] Clear checked-off items from active list
     # -------------------------------------------------
     print("[7] Clearing checked-off items from active list...")
-    sl.clear_checked_off()
+    sl_svc.clear_all_items()
 
-    remaining = sl.get_active_items(include_checked_off=True)
-    print("    Remaining items (include_checked_off=True):")
+    remaining = sl_svc.get_all_items()
+    print("    Remaining items:")
     for item in remaining:
-        status = "✓" if item.is_checked_off else " "
+        status = "x" if item.is_checked_off else " "
         active_flag = "active" if item.is_active else "inactive"
         print(f" [{status}] ({item.id}) {item.display_name} [{active_flag}]")
 

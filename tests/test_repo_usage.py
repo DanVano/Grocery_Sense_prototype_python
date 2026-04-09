@@ -17,7 +17,7 @@ from Grocery_Sense.data.repositories.stores_repo import (
 from Grocery_Sense.data.repositories.shopping_list_repo import (
     add_item,
     list_active_items,
-    mark_checked_off,
+    set_checked_off,
     clear_checked_off_items,
 )
 
@@ -88,7 +88,7 @@ def run_smoke_test() -> None:
     if active_items:
         first_id = active_items[0].id
         print(f"[6] Marking item {first_id} as checked off...")
-        mark_checked_off(first_id, checked=True)
+        set_checked_off(first_id, checked=True)
 
         active_items_after = list_active_items(include_checked_off=True)
         print("    Items after check-off (including checked):")

@@ -707,3 +707,38 @@ def reset_secondary_member_to_household_baseline(member_id: int) -> bool:
     target.profile = ensure_member_profile_defaults(new_prof, role=target.role)
     save_config(cfg)
     return True
+
+
+def get_user_profile() -> Dict[str, Any]:
+    """
+    Return a flat profile dict for the master household member.
+    Provides the keys expected by MealSuggestionService:
+      allergies, avoid_ingredients, restrictions, prefer_meats, avoid_meats, favorite_tags
+    """
+    raw: Dict[str, Any] = {}
+    try:
+        master = get_master_member()
+        if master and master.profile:
+            raw = dict(master.profile)
+    except Exception:
+        pass
+
+    if not raw:
+        raw = default_member_profile()
+
+    if "avoid_ingredients" not in raw:
+        raw["avoid_ingredients"] = list(raw.get("hard_excludes", []) + raw.get("soft_excludes", []))
+    if "restrictions" not in raw:
+        restrictions: List[str] = []
+        if not raw.get("eats_meat", True):
+            restrictions.append("no_meat")
+        if not raw.get("eats_fish", True):
+            restrictions.append("no_fish")
+        raw["restrictions"] = restrictions
+    if "prefer_meats" not in raw:
+        weights = raw.get("preferred_protein_weights", {})
+        raw["prefer_meats"] = [k for k, v in weights.items() if isinstance(v, (int, float)) and v > 1.0]
+    if "avoid_meats" not in raw:
+        raw["avoid_meats"] = list(raw.get("excluded_proteins", []))
+
+    return raw
