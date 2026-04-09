@@ -238,3 +238,11 @@ The schema is defined in `src/Grocery_Sense/data/schema.py` and initialized via 
 - Do not introduce web frameworks (Flask, FastAPI, etc.) — this is a desktop app.
 - Do not add ORM dependencies — keep SQLite raw.
 - Do not create helper utilities for one-off operations.
+
+---
+
+## Off-Limits Folders
+
+| Folder | Rule |
+|--------|------|
+| `Notes/` | **Never touch unless the user explicitly names this folder.** Do not read, modify, create files in, or reference anything inside `Notes/`. It is a personal reference folder excluded from git. |
