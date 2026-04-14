@@ -26,5 +26,9 @@ def main():
         print(" ->", res)
 
 
+def test_item_mapping_smoke():
+    main()
+
+
 if __name__ == "__main__":
     main()

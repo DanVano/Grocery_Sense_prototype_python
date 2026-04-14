@@ -60,5 +60,9 @@ def run_smoke_test() -> None:
     print("\n=== Service-level smoke test complete ===")
 
 
+def test_shopping_list_service_smoke():
+    run_smoke_test()
+
+
 if __name__ == "__main__":
     run_smoke_test()

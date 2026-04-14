@@ -58,6 +58,33 @@ class ShoppingListService:
             lines.append(f"  {status} {it.display_name}{qty}{unit}")
         return "\n".join(lines)
 
+    def get_active_items(self, *, store_id: Optional[int] = None, include_checked_off: bool = False):
+        return shopping_list_repo.list_active_items(store_id=store_id, include_checked_off=include_checked_off)
+
+    def add_single_item(
+        self,
+        name: str,
+        quantity: Optional[float] = None,
+        unit: str = "",
+        planned_store_id: Optional[int] = None,
+        notes: Optional[str] = None,
+        added_by: Optional[str] = None,
+        item_id: Optional[int] = None,
+        auto_map: bool = False,
+    ) -> int:
+        row_id = shopping_list_repo.add_item(
+            display_name=name,
+            quantity=float(quantity) if quantity is not None else 1.0,
+            unit=unit or "",
+            notes=notes or "",
+            added_by=added_by,
+            planned_store_id=planned_store_id,
+        )
+        return row_id
+
+    def soft_delete_item(self, item_id: int) -> None:
+        shopping_list_repo.delete_item(item_id)
+
     def check_off_item(self, item_id: int, *, checked: bool = True) -> None:
         shopping_list_repo.set_checked_off(item_id, checked)
 
@@ -69,8 +96,8 @@ class ShoppingListService:
                 shopping_list_repo.delete_item(it.id)
 
 
-def get_active_items(*, store_id: Optional[int] = None):
-    return shopping_list_repo.list_active_items(store_id=store_id)
+def get_active_items(*, store_id: Optional[int] = None, include_checked_off: bool = False):
+    return shopping_list_repo.list_active_items(store_id=store_id, include_checked_off=include_checked_off)
 
 
 def get_all_items():
@@ -139,17 +166,9 @@ def apply_optimizer_plan_to_active_list(
     Returns a summary dict for UI.
     """
     mode_key = (mode or "fast").strip().lower()
-    if mode_key in {"fast", "single", "one", "one_store"}:
-        plan = getattr(optimizer_result, "best_single_store_plan", None)
-        plan_label = "Fast trip (one store)"
-    elif mode_key in {"savings", "two", "two_store", "split"}:
-        plan = getattr(optimizer_result, "best_two_store_plan", None)
-        plan_label = "Savings (up to two stores)"
-    else:
-        plan = getattr(optimizer_result, "best_single_store_plan", None)
-        plan_label = "Fast trip (one store)"
+    stores_in_result = list(getattr(optimizer_result, "stores", []) or [])
 
-    if not plan:
+    if not stores_in_result:
         return {
             "ok": False,
             "error": "No plan available to apply.",
@@ -158,6 +177,12 @@ def apply_optimizer_plan_to_active_list(
             "unassigned": 0,
             "cleared": 0,
         }
+
+    result_mode = getattr(optimizer_result, "mode", "")
+    if result_mode == "one_store":
+        plan_label = "Fast trip (one store)"
+    else:
+        plan_label = "Savings (up to two stores)"
 
     if clear_first:
         cleared = clear_planned_stores_for_active_list(include_checked_off=False)
@@ -168,22 +193,21 @@ def apply_optimizer_plan_to_active_list(
     unassigned_hard_excluded = 0
     skipped_no_id = 0
 
-    lines = list(getattr(plan, "lines", []) or [])
-    for line in lines:
-        item = getattr(line, "item", None)
-        item_id = getattr(item, "id", None)
-        if item_id is None:
-            skipped_no_id += 1
-            continue
+    for store_plan in stores_in_result:
+        store_id = getattr(store_plan, "store_id", None)
+        for item_plan in list(getattr(store_plan, "items", []) or []):
+            item_id = getattr(item_plan, "item_id", None)
+            if item_id is None:
+                skipped_no_id += 1
+                continue
 
-        is_hard = bool(getattr(line, "is_hard_excluded", False))
-        store_id = None if is_hard else getattr(line, "store_id", None)
+            is_hard = bool(getattr(item_plan, "hard_excluded", False))
+            assigned_store = None if is_hard else store_id
 
-        if store_id is None:
             if is_hard:
                 unassigned_hard_excluded += 1
 
-        assignments.append((int(item_id), int(store_id) if store_id is not None else None))
+            assignments.append((int(item_id), int(assigned_store) if assigned_store is not None else None))
 
     updated = shopping_list_repo.bulk_set_planned_store_ids(assignments)
 

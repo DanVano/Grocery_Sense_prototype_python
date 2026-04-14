@@ -239,9 +239,8 @@ class PlanningService:
     ) -> Optional[float]:
         pts = get_prices_for_item(
             item_id=item_id,
-            days_back=days_back,
+            since_days=days_back,
             store_id=store_id,
-            limit=history_limit,
         )
         prices = [p.unit_price for p in pts if p.unit_price is not None]
         if not prices:

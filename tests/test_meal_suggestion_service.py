@@ -66,5 +66,9 @@ def main():
     print("\n=== MealSuggestionService smoke test complete ===")
 
 
+def test_meal_suggestion_smoke():
+    main()
+
+
 if __name__ == "__main__":
     main()

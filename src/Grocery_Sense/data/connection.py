@@ -20,6 +20,9 @@ DB_FILENAME = "grocery_sense.db"
 # Keyed by resolved db path so in-memory / test DBs each get their own check.
 _integrity_checked: set = set()
 
+# Set by pytest conftest to redirect all connections to a temp test DB.
+_TEST_DB_PATH: Optional[str] = None
+
 
 def get_db_path(base_dir: Optional[Path] = None) -> Path:
     """
@@ -69,8 +72,11 @@ def get_connection(base_dir: Optional[Path] = None) -> sqlite3.Connection:
     On the first connection per process, runs PRAGMA integrity_check and raises
     RuntimeError immediately if corruption is detected.
     """
-    db_path = get_db_path(base_dir)
-    conn = sqlite3.connect(db_path)
+    if _TEST_DB_PATH is not None:
+        db_path = Path(_TEST_DB_PATH)
+    else:
+        db_path = get_db_path(base_dir)
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row  # nicer dict-like access
     _check_integrity(conn, db_path)
     return conn

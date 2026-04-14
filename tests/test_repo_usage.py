@@ -111,5 +111,9 @@ def run_smoke_test() -> None:
     print("=== Smoke test complete ===")
 
 
+def test_repo_usage_smoke():
+    run_smoke_test()
+
+
 if __name__ == "__main__":
     run_smoke_test()

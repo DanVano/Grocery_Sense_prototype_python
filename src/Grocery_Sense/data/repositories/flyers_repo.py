@@ -156,16 +156,6 @@ class FlyersRepo:
         with get_connection() as conn:
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS stores (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
-
-            conn.execute(
-                """
                 CREATE TABLE IF NOT EXISTS flyer_batches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     store_id INTEGER NOT NULL,

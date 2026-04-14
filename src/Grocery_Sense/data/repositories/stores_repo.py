@@ -176,6 +176,7 @@ def set_store_favorite(store_id: int, is_favorite: bool, priority: Optional[int]
                 """,
                 (1 if is_favorite else 0, store_id),
             )
+        conn.commit()
 
 
 def update_store_address(
@@ -196,6 +197,7 @@ def update_store_address(
             """,
             (address, city, postal_code, store_id),
         )
+        conn.commit()
 
 
 def delete_store(store_id: int) -> None:
@@ -204,6 +206,7 @@ def delete_store(store_id: int) -> None:
     """
     with get_connection() as conn, closing(conn.cursor()) as cur:
         cur.execute("DELETE FROM stores WHERE id = ?", (store_id,))
+        conn.commit()
 
 
 # ---------- Flipp / external helpers ----------

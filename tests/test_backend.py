@@ -109,6 +109,10 @@ def run_smoke_test() -> None:
     print("\n=== Brain smoke test complete ===")
 
 
+def test_backend_smoke():
+    run_smoke_test()
+
+
 def main() -> None:
     run_smoke_test()
 

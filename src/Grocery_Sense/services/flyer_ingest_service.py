@@ -109,9 +109,8 @@ class FlyerIngestService:
             sha = compute_sha256(p)
             asset_id = self.repo.add_asset(
                 flyer_id=flyer_id,
-                asset_path=str(p),
                 asset_type=asset_type,
-                page_index=None,
+                path=str(p),
                 sha256=sha,
             )
             assets_count += 1

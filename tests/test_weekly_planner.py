@@ -39,5 +39,9 @@ def main():
     print("\n=== WeeklyPlannerService smoke test complete ===")
 
 
+def test_weekly_planner_smoke():
+    main()
+
+
 if __name__ == "__main__":
     main()

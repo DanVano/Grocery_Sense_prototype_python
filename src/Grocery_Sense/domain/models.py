@@ -109,6 +109,8 @@ class ShoppingListItem:
     is_checked_off: bool = False
     is_active: bool = True
     notes: Optional[str] = None
+    category: Optional[str] = None
+    added_by_member_id: Optional[int] = None
 
 
 # ---------- User profile & sync ----------

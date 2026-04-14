@@ -40,5 +40,9 @@ def main():
     print("=== items_repo smoke test complete ===")
 
 
+def test_items_repo_smoke():
+    main()
+
+
 if __name__ == "__main__":
     main()

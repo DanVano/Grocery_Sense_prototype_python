@@ -15,8 +15,10 @@ from Grocery_Sense.data.repositories.prices_repo import (
 # Preferences (optional; code fails-safe if not present)
 try:
     from Grocery_Sense.services import preferences_service
+    from Grocery_Sense.config import config_store
 except Exception:  # pragma: no cover
     preferences_service = None  # type: ignore
+    config_store = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +169,7 @@ class BasketOptimizerService:
             mode = "two_store"
 
         basket_items = shopping_list_repo.list_active_items()
-        stores = stores_repo.list_stores(include_disabled=False)
+        stores = stores_repo.list_stores()
 
         result = BasketOptimizationResult(mode=mode)
 

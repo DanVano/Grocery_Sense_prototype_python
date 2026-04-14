@@ -25,6 +25,70 @@ class AlertKey:
     alert_kind: str  # "below_usual" | "stock_up" | "both"
 
 
+@dataclass
+class PriceDropAlert:
+    alert_type: str                     # "DROP_BELOW_USUAL" | "STOCK_UP" | "BOTH"
+    item_name: str
+    store_name: str
+    current_unit_price: Optional[float]
+    unit: str
+    usual_unit_price: Optional[float]
+    pct_below_usual: Optional[float]
+    low_6mo_global: Optional[float]
+    low_6mo_store: Optional[float]
+    pct_above_low_6mo: Optional[float]
+    is_staple: bool
+    staple_purchases_90d: int
+    usual_source: str                   # "receipt" | "estimated" | "unknown"
+    receipt_samples: int
+    valid_to: Optional[str]
+    warnings: List[str]
+    soft_excluded_by: List[str]
+    soft_exclude_hit: Optional[str]
+
+    @staticmethod
+    def _from_dict(d: Dict[str, Any]) -> "PriceDropAlert":
+        kind = str(d.get("alert_kind") or "")
+        alert_type_map = {
+            "below_usual": "DROP_BELOW_USUAL",
+            "stock_up": "STOCK_UP",
+            "both": "BOTH",
+        }
+        alert_type = alert_type_map.get(kind, kind.upper() if kind else "DROP_BELOW_USUAL")
+
+        basis = str(d.get("basis") or "")
+        if "receipt" in basis:
+            usual_source = "receipt"
+        elif "estimated" in basis:
+            usual_source = "estimated"
+        else:
+            usual_source = "unknown"
+
+        notes = d.get("notes") or ""
+        warnings = [notes] if notes else []
+
+        return PriceDropAlert(
+            alert_type=alert_type,
+            item_name=str(d.get("item_name") or ""),
+            store_name=str(d.get("store_name") or ""),
+            current_unit_price=float(d["current_price"]) if d.get("current_price") is not None else None,
+            unit="",
+            usual_unit_price=float(d["usual_price"]) if d.get("usual_price") is not None else None,
+            pct_below_usual=float(d["pct_below_usual"]) / 100.0 if d.get("pct_below_usual") is not None else None,
+            low_6mo_global=float(d["six_month_low"]) if d.get("six_month_low") is not None else None,
+            low_6mo_store=None,
+            pct_above_low_6mo=float(d["pct_above_low"]) / 100.0 if d.get("pct_above_low") is not None else None,
+            is_staple=bool(d.get("is_staple", 0)),
+            staple_purchases_90d=int(d.get("receipt_samples") or 0),
+            usual_source=usual_source,
+            receipt_samples=int(d.get("receipt_samples") or 0),
+            valid_to=None,
+            warnings=warnings,
+            soft_excluded_by=[],
+            soft_exclude_hit=None,
+        )
+
+
 class PriceDropAlertService:
     """
     Milestone 2 engine:
@@ -245,6 +309,12 @@ class PriceDropAlertService:
 
         out.sort(key=_sort_key)
         return out
+
+    def get_alerts(self, *, limit: int = 250) -> List[PriceDropAlert]:
+        """Return open alerts as PriceDropAlert dataclass objects (UI-friendly)."""
+        raw = self.get_open_alerts()
+        alerts = [PriceDropAlert._from_dict(d) for d in raw]
+        return alerts[:limit] if limit > 0 else alerts
 
     def get_open_alerts(self) -> List[Dict[str, Any]]:
         self._ensure_tables()
