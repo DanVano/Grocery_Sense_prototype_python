@@ -223,7 +223,7 @@ def bulk_set_planned_store_ids(assignments: List[Tuple[int, Optional[int]]]) -> 
 
     with get_connection() as conn:
         conn.executemany(
-            "UPDATE shopping_list SET planned_store_id = ? WHERE item_id = ?",
+            "UPDATE shopping_list SET planned_store_id = ? WHERE id = ?",
             [(store_id, item_id) for (item_id, store_id) in rows],
         )
         conn.commit()

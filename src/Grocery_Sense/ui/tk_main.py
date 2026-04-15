@@ -172,21 +172,21 @@ class GrocerySenseApp(tk.Tk):
             width=35,
         ).grid(row=row, column=0, sticky="w", pady=2)
         row += 1
-	
+
         ttk.Button(
-    	    frame,
-    	    text="11) Preferences",
-    	    command=self._safe_call(lambda: open_preferences_window(self, log=self._log)),
-    	    width=35,
-	    ).grid(row=row, column=0, sticky="w", pady=2)
+            frame,
+            text="11) Preferences",
+            command=self._safe_call(lambda: open_preferences_window(self, log=self._log)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
         row += 1
 
         ttk.Button(
-    	    frame,
-    	    text="12) Deal Feed (Active)",
-    	    command=self._safe_call(lambda: open_deal_feed_window(self, log=self._log)),
-    	    width=35,
-	    ).grid(row=row, column=0, sticky="w", pady=2)
+            frame,
+            text="12) Deal Feed (Active)",
+            command=self._safe_call(lambda: open_deal_feed_window(self, log=self._log)),
+            width=35,
+        ).grid(row=row, column=0, sticky="w", pady=2)
         row += 1
 
         ttk.Button(

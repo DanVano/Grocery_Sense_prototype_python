@@ -727,7 +727,11 @@ def get_user_profile() -> Dict[str, Any]:
         raw = default_member_profile()
 
     if "avoid_ingredients" not in raw:
-        raw["avoid_ingredients"] = list(raw.get("hard_excludes", []) + raw.get("soft_excludes", []))
+        hard_ex = raw.get("hard_excludes", [])
+        soft_ex = raw.get("soft_excludes", [])
+        hard_ex = list(hard_ex) if isinstance(hard_ex, (list, tuple)) else ([hard_ex] if hard_ex else [])
+        soft_ex = list(soft_ex) if isinstance(soft_ex, (list, tuple)) else ([soft_ex] if soft_ex else [])
+        raw["avoid_ingredients"] = hard_ex + soft_ex
     if "restrictions" not in raw:
         restrictions: List[str] = []
         if not raw.get("eats_meat", True):
