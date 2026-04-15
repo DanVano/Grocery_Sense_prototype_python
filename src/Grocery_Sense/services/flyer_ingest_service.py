@@ -408,12 +408,15 @@ class FlyerIngestService:
             return None
 
         # Common flyer patterns
-        if re.search(r"\b\d+\s*/\s*\$?\s*\d+(?:\.\d+)?\b", t):
-            return re.search(r"\b\d+\s*/\s*\$?\s*\d+(?:\.\d+)?\b", t).group(0)
-        if re.search(r"\b\d+\s*for\s*\$?\s*\d+(?:\.\d+)?\b", t, flags=re.IGNORECASE):
-            return re.search(r"\b\d+\s*for\s*\$?\s*\d+(?:\.\d+)?\b", t, flags=re.IGNORECASE).group(0)
-        if re.search(r"\b\d+\s*@\s*\$?\s*\d+(?:\.\d+)?\b", t):
-            return re.search(r"\b\d+\s*@\s*\$?\s*\d+(?:\.\d+)?\b", t).group(0)
+        m = re.search(r"\b\d+\s*/\s*\$?\s*\d+(?:\.\d+)?\b", t)
+        if m:
+            return m.group(0)
+        m = re.search(r"\b\d+\s*for\s*\$?\s*\d+(?:\.\d+)?\b", t, flags=re.IGNORECASE)
+        if m:
+            return m.group(0)
+        m = re.search(r"\b\d+\s*@\s*\$?\s*\d+(?:\.\d+)?\b", t)
+        if m:
+            return m.group(0)
 
         # Basic $ amount
         m = re.search(r"\$\s*\d+(?:\.\d{2})", t)

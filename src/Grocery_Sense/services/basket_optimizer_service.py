@@ -448,7 +448,7 @@ class BasketOptimizerService:
             unit_price, unit = flyer
             return PricePick(store_id=store_id, store_name=store_name, unit_price=unit_price, unit=unit, source="flyer")
 
-                # 2) Most recent store-specific history
+        # 2) Most recent store-specific history
         pr = prices_repo.get_most_recent_price(item_id=item_id, store_id=store_id)
         if pr and getattr(pr, "unit_price", None) is not None:
             return PricePick(

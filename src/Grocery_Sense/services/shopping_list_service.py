@@ -79,6 +79,7 @@ class ShoppingListService:
             notes=notes or "",
             added_by=added_by,
             planned_store_id=planned_store_id,
+            item_id=item_id,
         )
         return row_id
 

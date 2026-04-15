@@ -26,7 +26,7 @@ class ItemAliasesRepo:
 
     def get_by_alias(self, alias_text: str) -> Optional[ItemAlias]:
         alias_text = alias_text.strip().lower()
-        with get_connection(self.db_path) as conn:
+        with get_connection() as conn:
             row = conn.execute(
                 """
                 SELECT id, alias_text, item_id, confidence, source, created_at, last_seen_at, times_seen
@@ -49,7 +49,7 @@ class ItemAliasesRepo:
     ) -> None:
         alias_text = alias_text.strip().lower()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with get_connection(self.db_path) as conn:
+        with get_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO item_aliases (alias_text, item_id, confidence, source, created_at, last_seen_at, times_seen)
@@ -68,7 +68,7 @@ class ItemAliasesRepo:
     def mark_seen(self, alias_text: str) -> None:
         alias_text = alias_text.strip().lower()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with get_connection(self.db_path) as conn:
+        with get_connection() as conn:
             conn.execute(
                 """
                 UPDATE item_aliases
@@ -80,7 +80,7 @@ class ItemAliasesRepo:
             conn.commit()
 
     def list_all(self) -> List[ItemAlias]:
-        with get_connection(self.db_path) as conn:
+        with get_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT id, alias_text, item_id, confidence, source, created_at, last_seen_at, times_seen

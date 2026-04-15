@@ -777,13 +777,13 @@ def get_price_stats_batch(
         FROM prices
         WHERE item_id IN ({item_csv})
           AND unit_price IS NOT NULL
-          AND date(COALESCE(date, created_at)) >= date('now', '{_since_clause(since_days)}')
+          AND date(COALESCE(date, created_at)) >= date('now', ?)
         GROUP BY item_id
     """
 
     out: Dict[int, PriceStats] = {}
     with closing(get_connection()) as conn:
-        for r in conn.execute(sql).fetchall():
+        for r in conn.execute(sql, (_since_clause(since_days),)).fetchall():
             item_id = int(r[0])
             out[item_id] = PriceStats(
                 item_id=item_id,

@@ -765,7 +765,7 @@ class FlyersRepo:
         # total members (for strong soft exclude label)
         total_members: Optional[int] = None
         try:
-            from Grocery_Sense import config_store
+            from Grocery_Sense.config import config_store
 
             cfg = config_store.load_config()
             total_members = len(getattr(cfg.household, "members", []) or [])
@@ -775,7 +775,7 @@ class FlyersRepo:
         # master name to exclude from "secondary" list
         master_name_norm: Optional[str] = None
         try:
-            from Grocery_Sense import config_store
+            from Grocery_Sense.config import config_store
 
             master = next((m for m in config_store.list_members() if m.role == config_store.ROLE_MASTER), None)
             if master:

@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from Grocery_Sense import config_store
+from Grocery_Sense.config import config_store
 from Grocery_Sense.services import preferences_service
 
 

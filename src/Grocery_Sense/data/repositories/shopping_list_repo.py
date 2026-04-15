@@ -128,13 +128,14 @@ def add_item(
     added_by: Optional[str] = None,
     added_by_member_id: Optional[int] = None,
     planned_store_id: Optional[int] = None,
+    item_id: Optional[int] = None,
 ) -> int:
     with get_connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO shopping_list
-                (display_name, quantity, unit, category, notes, added_by, added_by_member_id, planned_store_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (display_name, quantity, unit, category, notes, added_by, added_by_member_id, planned_store_id, item_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (display_name or "").strip(),
@@ -145,6 +146,7 @@ def add_item(
                 (added_by or "").strip() or None,
                 int(added_by_member_id) if added_by_member_id is not None else None,
                 int(planned_store_id) if planned_store_id is not None else None,
+                int(item_id) if item_id is not None else None,
             ),
         )
         conn.commit()

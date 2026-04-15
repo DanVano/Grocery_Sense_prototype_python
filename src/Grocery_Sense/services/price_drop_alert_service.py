@@ -579,7 +579,7 @@ class PriceDropAlertService:
               AND dismissed_at IS NOT NULL
               AND date(dismissed_at) >= date('now', ?)
             """,
-            (f"-{int(self.ALERT_SUPPRESSION_DAYS)} day",),
+            (f"-{int(self.ALERT_SUPPRESSION_DAYS)} days",),
         ).fetchall()
 
         out: Set[AlertKey] = set()

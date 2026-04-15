@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from Grocery_Sense import config_store
+from Grocery_Sense.config import config_store
 
 # ---------------------------------------------------------------------------
 # Canonical option lists (driven by config_store defaults)
