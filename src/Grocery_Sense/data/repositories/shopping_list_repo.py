@@ -18,6 +18,7 @@ class ShoppingListRow:
     added_by_member_id: Optional[int]
     is_active: bool
     planned_store_id: Optional[int]
+    item_id: Optional[int] = None
 
 
 def _row_to_obj(row) -> ShoppingListRow:
@@ -32,6 +33,7 @@ def _row_to_obj(row) -> ShoppingListRow:
         added_by_member_id=int(row["added_by_member_id"]) if row["added_by_member_id"] is not None else None,
         is_active=bool(row["is_active"] or 0),
         planned_store_id=int(row["planned_store_id"]) if row["planned_store_id"] is not None else None,
+        item_id=int(row["item_id"]) if row["item_id"] is not None else None,
     )
 
 
@@ -59,7 +61,8 @@ def list_active_items(
                     notes,
                     added_by_member_id,
                     is_active,
-                    planned_store_id
+                    planned_store_id,
+                    item_id
                 FROM shopping_list
                 WHERE is_active = 1 AND is_deleted = 0 {checked_filter}
                 ORDER BY id DESC
@@ -78,7 +81,8 @@ def list_active_items(
                     notes,
                     added_by_member_id,
                     is_active,
-                    planned_store_id
+                    planned_store_id,
+                    item_id
                 FROM shopping_list
                 WHERE is_active = 1 AND is_deleted = 0 {checked_filter}
                   AND planned_store_id = ?
@@ -104,7 +108,8 @@ def list_all_items() -> List[ShoppingListRow]:
                 notes,
                 added_by_member_id,
                 is_active,
-                planned_store_id
+                planned_store_id,
+                item_id
             FROM shopping_list
             WHERE is_deleted = 0
             ORDER BY id DESC

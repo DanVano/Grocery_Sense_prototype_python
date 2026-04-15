@@ -423,9 +423,8 @@ class PlanningService:
         for store in stores:
             pts = get_prices_for_item(
                 item_id=item_row.id,
-                days_back=days_back,
                 store_id=store.id,
-                limit=history_limit,
+                since_days=days_back,
             )
             prices = [p.unit_price for p in pts if p.unit_price is not None]
             if not prices:

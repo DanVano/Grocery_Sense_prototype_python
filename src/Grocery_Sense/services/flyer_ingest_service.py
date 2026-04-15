@@ -123,13 +123,11 @@ class FlyerIngestService:
             json_path = raw_dir / f"{safe_stem}__{az.operation_id}.json"
             json_path.write_text(json.dumps(az.analyze_result, ensure_ascii=False, indent=2), encoding="utf-8")
 
+            raw_json_str = json.dumps(az.analyze_result, ensure_ascii=False)
             self.repo.add_raw_json(
                 flyer_id=flyer_id,
-                asset_id=asset_id,
-                operation_id=az.operation_id,
-                json_path=str(json_path),
-                raw_json_dict=az.analyze_result,
-                model_id="prebuilt-layout",
+                raw_json=raw_json_str,
+                sha256=compute_sha256(raw_json_str.encode()),
             )
             raw_count += 1
 

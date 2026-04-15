@@ -159,7 +159,7 @@ def _compute_price_contribution_for_ingredient(
         # Some upside, but we don’t know how good vs history.
         if best_deal is not None:
             reasons_out.append(
-                f"{name} is on sale at {best_deal.store} (price {best_deal.price_text})."
+                f"{name} is on sale at {best_deal.store} (price {best_deal.price})."
             )
         return 0.15
 
@@ -483,6 +483,15 @@ def format_meal_explanation(
     return "\n".join(lines)
 
 
-# Alias for backward compatibility with existing tests
-explain_suggested_meal = format_meal_explanation
+def explain_suggested_meal(meal: "SuggestedMeal") -> str:
+    """Wrapper that unpacks a SuggestedMeal into format_meal_explanation."""
+    recipe_name = meal.recipe.get("name", "Unknown recipe") if meal.recipe else "Unknown recipe"
+    return format_meal_explanation(
+        recipe_name=recipe_name,
+        preference_score=meal.preference_score,
+        deal_score=meal.deal_score,
+        price_score=meal.price_score,
+        variety_score=meal.variety_score,
+        reasons=meal.reasons,
+    )
 

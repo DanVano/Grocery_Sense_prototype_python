@@ -42,7 +42,7 @@ class Deal:
     store: str                  # "Real Canadian Superstore"
     price: Optional[float]      # unit price if known (per kg or per unit)
     unit: Optional[str] = None  # "kg", "lb", "each", etc.
-    raw: Dict[str, Any] = None  # original JSON payload for debugging
+    raw: Optional[Dict[str, Any]] = None  # original JSON payload for debugging
 
 
 # ---- Meat-aware heuristics -------------------------------------------------

@@ -31,7 +31,7 @@ class ShoppingListService:
                 continue
             row_id = shopping_list_repo.add_item(
                 display_name=name,
-                notes=added_by or "",
+                added_by=added_by,
                 added_by_member_id=member_id,
             )
             if planned_store_id is not None:

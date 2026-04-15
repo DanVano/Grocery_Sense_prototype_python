@@ -38,6 +38,42 @@ def ensure_receipt_support_tables() -> None:
             );
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS receipt_raw_json (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                receipt_id   INTEGER NOT NULL,
+                operation_id TEXT,
+                json_path    TEXT,
+                raw_json     TEXT,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (receipt_id) REFERENCES receipts(id) ON DELETE CASCADE
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS receipt_file_hashes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash   TEXT NOT NULL UNIQUE,
+                receipt_id  INTEGER NOT NULL,
+                file_path   TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (receipt_id) REFERENCES receipts(id) ON DELETE CASCADE
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS receipt_signatures (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                signature   TEXT NOT NULL UNIQUE,
+                receipt_id  INTEGER NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (receipt_id) REFERENCES receipts(id) ON DELETE CASCADE
+            );
+            """
+        )
         conn.commit()
 
 

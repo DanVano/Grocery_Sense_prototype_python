@@ -202,7 +202,7 @@ class BasketOptimizerService:
                 # Can't optimize without item_id (in this milestone)
                 continue
 
-            name = str(getattr(it, "name", "") or "").strip() or f"Item {item_id}"
+            name = str(getattr(it, "display_name", "") or "").strip() or f"Item {item_id}"
             unit = str(getattr(it, "unit", "") or "").strip().lower() or "each"
             try:
                 qty = float(getattr(it, "quantity", 1.0) or 1.0)

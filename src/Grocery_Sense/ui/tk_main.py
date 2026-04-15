@@ -29,7 +29,7 @@ from tkinter.scrolledtext import ScrolledText
 from Grocery_Sense.data.schema import initialize_database
 
 from Grocery_Sense.services.shopping_list_service import ShoppingListService
-from Grocery_Sense.services.meal_suggestion_service import MealSuggestionService
+from Grocery_Sense.services.meal_suggestion_service import MealSuggestionService, explain_suggested_meal
 from Grocery_Sense.services.flyer_sync_scheduler import FlyerSyncScheduler
 
 from Grocery_Sense.services.weekly_planner_service import (
