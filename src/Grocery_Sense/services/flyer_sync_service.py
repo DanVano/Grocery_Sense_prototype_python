@@ -142,9 +142,12 @@ def run_sync(*, force: bool = False) -> FlyerSyncResult:
             continue
 
         try:
-            # Derive validity window from the first deal if available; else use default.
-            valid_from = raw_deals[0].get("valid_from") or default_valid_from
-            valid_to = raw_deals[0].get("valid_to") or default_valid_to
+            # Derive validity window from the full batch so a batch that spans
+            # multiple flyer weeks isn't truncated to the first deal's window.
+            vf_candidates = [d.get("valid_from") for d in raw_deals if d.get("valid_from")]
+            vt_candidates = [d.get("valid_to") for d in raw_deals if d.get("valid_to")]
+            valid_from = min(vf_candidates) if vf_candidates else default_valid_from
+            valid_to = max(vt_candidates) if vt_candidates else default_valid_to
 
             flyer_id = repo.create_flyer_batch(
                 store_id=store_id,
