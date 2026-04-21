@@ -41,7 +41,10 @@ def _read_last_sync_utc() -> Optional[datetime.datetime]:
         ts = data.get("last_sync_utc")
         if not ts:
             return None
-        return datetime.datetime.fromisoformat(ts)
+        dt = datetime.datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
     except Exception:
         return None
 
@@ -59,7 +62,7 @@ def needs_sync() -> bool:
     last = _read_last_sync_utc()
     if last is None:
         return True
-    elapsed = datetime.datetime.utcnow() - last
+    elapsed = datetime.datetime.now(datetime.timezone.utc) - last
     return elapsed.total_seconds() >= SYNC_INTERVAL_DAYS * 86400
 
 
@@ -157,5 +160,5 @@ def run_sync(*, force: bool = False) -> FlyerSyncResult:
         except Exception as exc:
             result.errors.append(f"{store_name}: DB insert failed — {exc}")
 
-    _write_last_sync_utc(datetime.datetime.utcnow())
+    _write_last_sync_utc(datetime.datetime.now(datetime.timezone.utc))
     return result
