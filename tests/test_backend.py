@@ -97,7 +97,7 @@ def run_smoke_test() -> None:
     # [7] Clear checked-off items from active list
     # -------------------------------------------------
     print("[7] Clearing checked-off items from active list...")
-    sl_svc.clear_all_items()
+    sl_svc.clear_all_checked_off()
 
     remaining = sl_svc.get_all_items()
     print("    Remaining items:")

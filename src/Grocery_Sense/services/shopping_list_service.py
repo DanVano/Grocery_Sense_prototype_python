@@ -136,6 +136,13 @@ def clear_all_items() -> None:
     shopping_list_repo.clear_all_items()
 
 
+def clear_all_checked_off() -> None:
+    """Soft-delete only the checked-off active items."""
+    for it in shopping_list_repo.list_all_items():
+        if it.is_checked_off and it.is_active:
+            shopping_list_repo.delete_item(it.id)
+
+
 # ---------------------------------------------------------------------------
 # NEW: Apply basket optimizer plan back into shopping list (planned_store_id)
 # ---------------------------------------------------------------------------
