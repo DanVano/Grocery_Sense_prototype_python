@@ -18,12 +18,12 @@ class ShoppingListService:
         *,
         planned_store_id: Optional[int] = None,
         added_by: Optional[str] = None,
+        member_id: Optional[int] = None,
     ) -> List[ShoppingListRow]:
         """
         Parse a comma-separated string of item names and add each to the list.
         Returns the newly created ShoppingListRow objects.
         """
-        member_id: Optional[int] = None
         created: List[ShoppingListRow] = []
         for raw in text.split(","):
             name = raw.strip()
