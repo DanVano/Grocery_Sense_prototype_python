@@ -15,6 +15,7 @@ Manual trigger (from "Sync Flyers" button):
 from __future__ import annotations
 
 import threading
+import traceback
 from typing import Callable, Optional
 
 from Grocery_Sense.services.flyer_sync_service import (
@@ -96,4 +97,4 @@ class FlyerSyncScheduler:
             try:
                 self._on_sync_complete(result)
             except Exception:
-                pass
+                traceback.print_exc()
