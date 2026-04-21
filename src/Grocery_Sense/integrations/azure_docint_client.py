@@ -759,7 +759,7 @@ def ingest_analyzed_receipt_into_db(
             unit_price=unit_price,
             line_total=line_total,
             discount=discount,
-            confidence=line_conf_1_5 or map_conf_1_5,
+            confidence_1_5=line_conf_1_5 or map_conf_1_5,
         )
 
         # Price point (only if we have an effective unit price)
