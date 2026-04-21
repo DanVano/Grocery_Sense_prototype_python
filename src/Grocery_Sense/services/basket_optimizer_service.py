@@ -22,10 +22,10 @@ except Exception:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# Small “phrase-safe” matcher (reduces false positives)
+# Small "phrase-safe" matcher (reduces false positives)
 # ---------------------------------------------------------------------------
 
-# Things we never want preference excludes to accidentally “hit”
+# Things we never want preference excludes to accidentally "hit"
 # (Ex: "olives" should NOT flag "olive oil")
 DEFAULT_EXCLUDE_SAFE_PHRASES: List[str] = [
     "olive oil",
@@ -152,7 +152,7 @@ class BasketOptimizerService:
         * Estimated total for 1-store (fast trip) or max-2-store (savings mode)
         * You save $X vs usual basket (avg over last 6 months / 180 days)
         * You save $Y vs lowest price seen (last 6 months / 180 days)
-    - Stars soft-excluded items and provides “why” details (ingredient hit + member list)
+    - Stars soft-excluded items and provides "why" details (ingredient hit + member list)
     """
 
     def __init__(self) -> None:
@@ -269,7 +269,7 @@ class BasketOptimizerService:
         # Build store plans and assign items to stores
         store_plans: Dict[int, StorePlan] = {sid: StorePlan(store_id=sid, store_name=store_map[sid]) for sid in chosen_store_ids}
 
-        # Assign each item to the store where it’s cheapest (or known)
+        # Assign each item to the store where it's cheapest (or known)
         for item in normalized:
             best_sid = self._best_store_for_item(item.item_id, chosen_store_ids, price_matrix)
             chosen = price_matrix.get((best_sid, item.item_id))
@@ -505,15 +505,15 @@ class BasketOptimizerService:
     # ---------------------------------------------------------------------
 
     def _score_store(self, s: Any, total: float, unknown: int) -> float:
-        “””
+        """
         Base store score: estimated cost + unknown-item penalty + favourite/priority bonus.
         Lower is better.
-        “””
+        """
         score = total + (unknown * 5.0)
         try:
-            if bool(getattr(s, “is_favorite”, False)):
+            if bool(getattr(s, "is_favorite", False)):
                 score *= 0.985
-            pr = int(getattr(s, “priority”, 0) or 0)
+            pr = int(getattr(s, "priority", 0) or 0)
             if pr > 0:
                 score *= max(0.97, 1.0 - (min(pr, 10) * 0.002))
         except Exception:
@@ -526,9 +526,9 @@ class BasketOptimizerService:
         stores: List[Any],
         price_matrix: Dict[Tuple[int, int], PricePick],
     ) -> int:
-        “””
+        """
         Best single store by estimated total cost, with a small bonus for favorites/priority.
-        “””
+        """
         best_id = int(stores[0].id)
         best_score: Optional[float] = None
 
@@ -556,12 +556,12 @@ class BasketOptimizerService:
         stores: List[Any],
         price_matrix: Dict[Tuple[int, int], PricePick],
     ) -> List[int]:
-        “””
+        """
         Choose up to two stores. We:
           1) rank stores by single-store score
           2) evaluate store pairs among top K candidates
           3) pick pair with lowest basket assignment total + small travel penalty
-        “””
+        """
         if len(stores) == 1:
             return [int(stores[0].id)]
 
@@ -617,8 +617,8 @@ class BasketOptimizerService:
                 score = total + (unknown * 5.0) + 6.0
                 try:
                     if (
-                        bool(getattr(store_by_id.get(a), “is_favorite”, False))
-                        or bool(getattr(store_by_id.get(b), “is_favorite”, False))
+                        bool(getattr(store_by_id.get(a), "is_favorite", False))
+                        or bool(getattr(store_by_id.get(b), "is_favorite", False))
                     ):
                         score *= 0.99
                 except Exception:
