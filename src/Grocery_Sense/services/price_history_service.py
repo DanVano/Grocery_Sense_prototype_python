@@ -17,6 +17,8 @@ from dataclasses import asdict
 from datetime import datetime, date
 from typing import Optional, Dict, Any, Tuple, List
 
+from collections import Counter
+
 from Grocery_Sense.data.repositories.items_repo import (
     get_item_by_name,
     get_item_by_id,
@@ -26,6 +28,7 @@ from Grocery_Sense.data.repositories.prices_repo import (
     add_price_point,
     get_most_recent_price,
     get_price_stats_for_item,
+    get_prices_for_item,
 )
 from Grocery_Sense.domain.models import Item, PricePoint
 
@@ -228,6 +231,64 @@ class PriceHistoryService:
             "min_unit_price": min_price,
             "max_unit_price": max_price,
             "sample_count": count,
+        }
+
+    def stats_for_item_by_store(
+        self,
+        item_id: int,
+        store_id: int,
+        window_days: int,
+    ) -> Dict[str, Any]:
+        """
+        Per-store price aggregation over a trailing window.
+
+        Returns a dict:
+            {
+              "avg_price": float | None,
+              "min_price": float | None,
+              "max_price": float | None,
+              "sample_count": int,
+              "unit_hint": str,
+              "most_recent_date": str,
+            }
+        """
+        points = get_prices_for_item(
+            item_id=item_id,
+            store_id=store_id,
+            since_days=window_days,
+        )
+
+        prices: List[float] = []
+        units: List[str] = []
+        dates: List[str] = []
+        for p in points:
+            if p.unit_price is not None:
+                prices.append(float(p.unit_price))
+            if isinstance(p.unit, str) and p.unit.strip():
+                units.append(p.unit.strip())
+            if isinstance(p.date, str) and p.date:
+                dates.append(p.date)
+
+        unit_hint = Counter(units).most_common(1)[0][0] if units else ""
+        most_recent_date = max(dates) if dates else ""
+
+        if not prices:
+            return {
+                "avg_price": None,
+                "min_price": None,
+                "max_price": None,
+                "sample_count": 0,
+                "unit_hint": unit_hint,
+                "most_recent_date": most_recent_date,
+            }
+
+        return {
+            "avg_price": sum(prices) / len(prices),
+            "min_price": min(prices),
+            "max_price": max(prices),
+            "sample_count": len(prices),
+            "unit_hint": unit_hint,
+            "most_recent_date": most_recent_date,
         }
 
     def classify_deal(

@@ -15,38 +15,19 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
-from collections import Counter
-
-
 from Grocery_Sense.data.repositories.items_repo import list_items
 from Grocery_Sense.data.repositories.stores_repo import list_stores
-from Grocery_Sense.data.repositories.prices_repo import get_prices_for_item
+from Grocery_Sense.services.price_history_service import PriceHistoryService
 
 
 # ----------------------------
 # Helpers
 # ----------------------------
 
-def _safe_float(v) -> Optional[float]:
-    try:
-        if v is None:
-            return None
-        return float(v)
-    except Exception:
-        return None
-
-
 def _fmt_money(v: Optional[float]) -> str:
     if v is None:
         return "-"
     return f"${v:,.2f}"
-
-
-def _most_common_unit(units: List[Optional[str]]) -> str:
-    cleaned = [u.strip() for u in units if isinstance(u, str) and u.strip()]
-    if not cleaned:
-        return ""
-    return Counter(cleaned).most_common(1)[0][0]
 
 
 @dataclass
@@ -83,6 +64,7 @@ class PriceHistoryWindow(tk.Toplevel):
         self._item_names: List[str] = []
 
         self._stores = list_stores(only_favorites=False, order_by_priority=True)
+        self._price_svc = PriceHistoryService()
 
         # Build UI
         self._build_header()
@@ -260,45 +242,21 @@ class PriceHistoryWindow(tk.Toplevel):
         self.summary_label.config(text="")
 
     def _compute_stats_for_store(self, item_id: int, store_id: int, store_name: str, window_days: int) -> StoreStats:
-        pts = get_prices_for_item(item_id=item_id, store_id=store_id, days_back=window_days, limit=None)
-
-        prices: List[float] = []
-        units: List[Optional[str]] = []
-        dates: List[str] = []
-
-        for p in pts:
-            fp = _safe_float(getattr(p, "unit_price", None))
-            if fp is not None:
-                prices.append(fp)
-            units.append(getattr(p, "unit", None))
-            d = getattr(p, "date", None)
-            if isinstance(d, str) and d:
-                dates.append(d)
-
-        if not prices:
-            return StoreStats(
-                store_id=store_id,
-                store_name=store_name,
-                window_days=window_days,
-                avg_price=None,
-                min_price=None,
-                max_price=None,
-                sample_count=0,
-                unit_hint=_most_common_unit(units),
-                most_recent_date=max(dates) if dates else "",
-            )
-
-        avg_price = sum(prices) / len(prices)
+        stats = self._price_svc.stats_for_item_by_store(
+            item_id=item_id,
+            store_id=store_id,
+            window_days=window_days,
+        )
         return StoreStats(
             store_id=store_id,
             store_name=store_name,
             window_days=window_days,
-            avg_price=avg_price,
-            min_price=min(prices),
-            max_price=max(prices),
-            sample_count=len(prices),
-            unit_hint=_most_common_unit(units),
-            most_recent_date=max(dates) if dates else "",
+            avg_price=stats["avg_price"],
+            min_price=stats["min_price"],
+            max_price=stats["max_price"],
+            sample_count=stats["sample_count"],
+            unit_hint=stats["unit_hint"],
+            most_recent_date=stats["most_recent_date"],
         )
 
     def _refresh_stats(self) -> None:
