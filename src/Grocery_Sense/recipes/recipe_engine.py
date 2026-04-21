@@ -103,15 +103,19 @@ class RecipeEngine:
         with self._recipes_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Normalize to list
-        if isinstance(data, dict):
-            # If someone stored {"recipes": [...]}
-            if "recipes" in data and isinstance(data["recipes"], list):
-                self._cache = data["recipes"]
-            else:
-                self._cache = [data]
-        else:
+        # Normalize to list. Accepts either a bare list of recipes or a dict
+        # wrapper of the form {"recipes": [...]}. Any other shape is rejected
+        # with a clear error so malformed JSON doesn't silently become a
+        # single bogus recipe.
+        if isinstance(data, list):
             self._cache = list(data)
+        elif isinstance(data, dict) and isinstance(data.get("recipes"), list):
+            self._cache = list(data["recipes"])
+        else:
+            raise ValueError(
+                f"recipes.json at {self._recipes_path} must be a list of recipes "
+                f"or an object with a 'recipes' list; got {type(data).__name__}"
+            )
 
         return list(self._cache)
 
