@@ -188,14 +188,14 @@ class DealFeedWindow(tk.Toplevel):
             return
 
         d = self._filtered_deals[idx]
-        soft_by = d.get("pref_soft_excluded_by", [])
-        hits = d.get("pref_soft_excluded_hits", [])
+        soft_by = d.get("pref_soft_excluders_all", [])
+        hits = d.get("pref_hit", "")
 
         if not (isinstance(soft_by, list) and len(soft_by) > 0):
             self._hide_tooltip()
             return
 
-        hit_txt = ", ".join(str(x) for x in hits if str(x).strip()) or "(match unknown)"
+        hit_txt = str(hits).strip() if hits else "(match unknown)"
         by_txt = ", ".join(str(x) for x in soft_by if str(x).strip()) or "(unknown)"
         tip_text = (
             "Why is this soft-excluded? (*)\n"
@@ -303,7 +303,7 @@ class DealFeedWindow(tk.Toplevel):
         show_soft = bool(self._show_soft_var.get())
 
         def is_soft(deal: Dict[str, Any]) -> bool:
-            v = deal.get("pref_soft_excluded_by", [])
+            v = deal.get("pref_soft_excluders_all", [])
             return isinstance(v, list) and len(v) > 0
 
         out: List[Dict[str, Any]] = []
@@ -329,11 +329,11 @@ class DealFeedWindow(tk.Toplevel):
             price = str(d.get("price_text") or "").strip()
             unit = str(d.get("unit") or "").strip()
 
-            valid_from = str(d.get("flyer_valid_from") or "")
-            valid_to = str(d.get("flyer_valid_to") or "")
+            valid_from = str(d.get("valid_from") or "")
+            valid_to = str(d.get("valid_to") or "")
             dates = f"{valid_from} → {valid_to}" if (valid_from and valid_to) else ""
 
-            soft_by = d.get("pref_soft_excluded_by", [])
+            soft_by = d.get("pref_soft_excluders_all", [])
             soft_flag = "*" if isinstance(soft_by, list) and len(soft_by) > 0 else ""
 
             oil_allowed = d.get("pref_oil_allowed", True)
@@ -383,8 +383,8 @@ class DealFeedWindow(tk.Toplevel):
             lines.append(f"Unit: {d.get('unit_price')} / {d.get('unit')}")
         if d.get("store_name"):
             lines.append(f"Store: {d.get('store_name')}")
-        if d.get("flyer_valid_from") and d.get("flyer_valid_to"):
-            lines.append(f"Valid: {d.get('flyer_valid_from')} → {d.get('flyer_valid_to')}")
+        if d.get("valid_from") and d.get("valid_to"):
+            lines.append(f"Valid: {d.get('valid_from')} → {d.get('valid_to')}")
         if d.get("page_index") is not None:
             try:
                 lines.append(f"Flyer page: {int(d.get('page_index')) + 1}")
@@ -393,12 +393,12 @@ class DealFeedWindow(tk.Toplevel):
 
         lines.append("")
         lines.append("Preference notes:")
-        soft_by = d.get("pref_soft_excluded_by", [])
-        hits = d.get("pref_soft_excluded_hits", [])
+        soft_by = d.get("pref_soft_excluders_all", [])
+        hits = d.get("pref_hit", "")
         if isinstance(soft_by, list) and len(soft_by) > 0:
             lines.append(f"• Soft-excluded by: {', '.join(str(x) for x in soft_by)}")
-            if isinstance(hits, list) and len(hits) > 0:
-                lines.append(f"• Matched ingredient(s): {', '.join(str(x) for x in hits)}")
+            if hits:
+                lines.append(f"• Matched ingredient(s): {hits}")
             else:
                 lines.append("• Matched ingredient(s): (unknown)")
             lines.append("  (Shown with * — later we can also de-rank it.)")

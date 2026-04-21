@@ -195,7 +195,7 @@ def _compute_price_score_for_recipe(
 
         deals = deals_by_ingredient.get(ing_low, [])
         contrib = _compute_price_contribution_for_ingredient(
-            ing_low, baseline, deals, reasons_out
+            ing, baseline, deals, reasons_out
         )
         contributions.append(contrib)
 
