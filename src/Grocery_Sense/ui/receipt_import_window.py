@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 
-from Grocery_Sense.data.connection import get_connection
+from Grocery_Sense.data.repositories import receipts_repo
 
 # Updated import: use outcome-based ingest (dedupe + optional replace)
 from Grocery_Sense.integrations.azure_docint_client import (
@@ -30,63 +30,30 @@ class _RowState:
     error: Optional[str] = None
 
 
-def _db_fetch_receipt_summary(receipt_id: int) -> Dict[str, Any]:
+def _fetch_receipt_summary(receipt_id: int) -> Dict[str, Any]:
     """
-    Small summary for UI.
-    Assumes your schema includes: receipts, stores, receipt_line_items.
+    Small summary for UI, delegated to receipts_repo so the UI never
+    touches the database directly.
     """
-    with get_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT
-                r.id,
-                r.purchase_date,
-                r.total_amount,
-                r.subtotal_amount,
-                r.tax_amount,
-                r.store_id,
-                s.name
-            FROM receipts r
-            LEFT JOIN stores s ON s.id = r.store_id
-            WHERE r.id = ?
-            """,
-            (int(receipt_id),),
-        ).fetchone()
+    rec = receipts_repo.get_receipt(int(receipt_id))
+    if not rec:
+        return {"receipt_id": receipt_id}
 
-        if not row:
-            return {"receipt_id": receipt_id}
-
-        cnt = conn.execute(
-            "SELECT COUNT(1) FROM receipt_line_items WHERE receipt_id = ?",
-            (int(receipt_id),),
-        ).fetchone()
-        item_count = int(cnt[0]) if cnt and cnt[0] is not None else 0
-
-        return {
-            "receipt_id": int(row[0]),
-            "purchase_date": row[1],
-            "total": row[2],
-            "subtotal": row[3],
-            "tax": row[4],
-            "store_id": row[5],
-            "store_name": row[6],
-            "item_count": item_count,
-        }
+    line_items = receipts_repo.list_receipt_line_items(int(receipt_id))
+    return {
+        "receipt_id": rec["id"],
+        "purchase_date": rec["purchase_date"],
+        "total": rec["total_amount"],
+        "subtotal": rec["subtotal_amount"],
+        "tax": rec["tax_amount"],
+        "store_id": rec["store_id"],
+        "store_name": rec["store_name"],
+        "item_count": len(line_items),
+    }
 
 
-def _db_fetch_raw_json_and_path(receipt_id: int) -> Tuple[Optional[str], Optional[str]]:
-    with get_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT raw_json, json_path
-            FROM receipt_raw_json
-            WHERE receipt_id = ?
-            """,
-            (int(receipt_id),),
-        ).fetchone()
-        if not row:
-            return None, None
-        return row[0], row[1]
+def _fetch_raw_json_and_path(receipt_id: int) -> Tuple[Optional[str], Optional[str]]:
+    return receipts_repo.get_receipt_raw_json(int(receipt_id))
 
 
 def _open_text_window(parent: tk.Widget, title: str, text: str) -> None:
@@ -416,7 +383,7 @@ class ReceiptImportWindow(tk.Toplevel):
             messagebox.showinfo("No receipt", "Select an imported receipt first.")
             return
 
-        summary = _db_fetch_receipt_summary(row.receipt_id)
+        summary = _fetch_receipt_summary(row.receipt_id)
         pretty = json.dumps(summary, indent=2, ensure_ascii=False)
         _open_text_window(self, f"Receipt Summary (id={row.receipt_id})", pretty)
 
@@ -426,7 +393,7 @@ class ReceiptImportWindow(tk.Toplevel):
             messagebox.showinfo("No receipt", "Select an imported receipt first.")
             return
 
-        raw_json, json_path = _db_fetch_raw_json_and_path(row.receipt_id)
+        raw_json, json_path = _fetch_raw_json_and_path(row.receipt_id)
         if not raw_json:
             messagebox.showinfo("Not found", "No raw JSON found for this receipt.")
             return
@@ -448,7 +415,7 @@ class ReceiptImportWindow(tk.Toplevel):
             messagebox.showinfo("No receipt", "Select an imported receipt first.")
             return
 
-        raw_json, json_path = _db_fetch_raw_json_and_path(row.receipt_id)
+        raw_json, json_path = _fetch_raw_json_and_path(row.receipt_id)
         if not json_path:
             messagebox.showinfo("No JSON path", "This receipt does not have a stored JSON path.")
             return
