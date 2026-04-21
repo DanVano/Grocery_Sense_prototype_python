@@ -265,6 +265,7 @@ class PreferencesWizardWindow(tk.Toplevel):
         # Steps
         self._step = 0
         self._steps: List[ttk.Frame] = []
+        self._auto_advanced_from_step0 = False
 
         # UI
         self._build_ui()
@@ -666,8 +667,11 @@ class PreferencesWizardWindow(tk.Toplevel):
         if idx == 3:
             self._refresh_protein_weights_ui()
 
-        # If wizard was launched with a member_id, skip step 1 automatically
-        if idx == 0 and self._member_id:
+        # If wizard was launched with a member_id, skip step 0 automatically
+        # on the very first visit. Without this one-shot guard, pressing Back
+        # from step 1 lands on step 0 and immediately bounces forward again.
+        if idx == 0 and self._member_id and not self._auto_advanced_from_step0:
+            self._auto_advanced_from_step0 = True
             self.after(0, lambda: self._show_step(1))
 
     def _back(self) -> None:
