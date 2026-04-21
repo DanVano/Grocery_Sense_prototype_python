@@ -88,7 +88,7 @@ class PriceHistoryService:
         receipt_id: Optional[int] = None,
         raw_name: Optional[str] = None,
         confidence: Optional[int] = None,
-    ) -> PricePoint:
+    ) -> int:
         """
         Record a price coming from a supermarket receipt.
 
@@ -96,7 +96,7 @@ class PriceHistoryService:
         - `unit_price` should be normalized (e.g. per kg or per each) before calling,
           but you can also store it "as-is" for now and normalize later.
 
-        Returns the created PricePoint.
+        Returns the inserted prices.id row.
         """
         item = self.ensure_item_exists(item_name)
         used_date = date_str or date.today().isoformat()
@@ -127,12 +127,14 @@ class PriceHistoryService:
         flyer_source_id: Optional[int] = None,
         raw_name: Optional[str] = None,
         confidence: Optional[int] = None,
-    ) -> PricePoint:
+    ) -> int:
         """
         Record a price coming from a flyer / Flipp.
 
         The `date_str` here should typically be the "valid_from" or current day
         of the flyer; you can decide that when integrating flipp.
+
+        Returns the inserted prices.id row.
         """
         item = self.ensure_item_exists(item_name)
         used_date = date_str or date.today().isoformat()
@@ -163,9 +165,11 @@ class PriceHistoryService:
         quantity: Optional[float] = None,
         total_price: Optional[float] = None,
         raw_name: Optional[str] = None,
-    ) -> PricePoint:
+    ) -> int:
         """
         Record a price manually entered by the user (e.g. quick comparison at store).
+
+        Returns the inserted prices.id row.
         """
         item = self.ensure_item_exists(item_name)
         used_date = date_str or date.today().isoformat()
