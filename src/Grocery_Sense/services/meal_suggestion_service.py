@@ -285,7 +285,9 @@ def _fetch_deals_for_ingredients(
     # Build a flat list of (searchable_text, Deal) pairs once
     local_deals: List[tuple] = []
     for r in rows:
-        title = str(r["title"] or r["description"] or "").lower()
+        title = str(r["title"] or r["description"] or "").lower().strip()
+        if not title:
+            continue
         price_val = r["price"]
         price = float(price_val) if price_val is not None else None
         unit = str(r["unit"] or "each").strip()
