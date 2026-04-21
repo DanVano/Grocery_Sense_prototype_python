@@ -143,6 +143,13 @@ class FlyerImportWindow(tk.Toplevel):
             return
 
         store_id = self._selected_store_id()
+        if store_id is None:
+            messagebox.showerror(
+                "Select a store",
+                "Choose the store this flyer is for before importing.",
+            )
+            return
+
         valid_from = (self.valid_from_var.get() or "").strip() or None
         valid_to = (self.valid_to_var.get() or "").strip() or None
         raw_json_dir = (self.raw_json_dir_var.get() or "flyer_raw_json").strip()
