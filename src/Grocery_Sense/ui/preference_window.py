@@ -453,7 +453,18 @@ class PreferencesWindow(tk.Toplevel):
 
         self.active_combo["values"] = labels
         active_id = self._cfg.household.active_member_id
-        active_label = next((lab for lab, mid in self._id_by_label.items() if mid == active_id), labels[0] if labels else "")
+        active_label = next(
+            (lab for lab, mid in self._id_by_label.items() if mid == active_id),
+            None,
+        )
+        if active_label is None:
+            # Stored active_member_id no longer maps to a label. Pick the first
+            # available member AND persist so the combobox and config agree.
+            active_label = labels[0] if labels else ""
+            if active_label and self._id_by_label.get(active_label) is not None:
+                fallback_id = self._id_by_label[active_label]
+                config_store.set_active_member_id(fallback_id)
+                self._cfg.household.active_member_id = fallback_id
         self.active_combo.set(active_label)
 
         self.members_listbox.delete(0, tk.END)
