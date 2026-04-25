@@ -111,7 +111,7 @@ def run_sync(*, force: bool = False) -> FlyerSyncResult:
     if not force and not needs_sync():
         return FlyerSyncResult(skipped_reason="too_soon")
 
-    stores = list_stores(include_disabled=False)
+    stores = list_stores()
     if not stores:
         return FlyerSyncResult(skipped_reason="no_stores")
 
