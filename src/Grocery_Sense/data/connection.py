@@ -78,6 +78,7 @@ def get_connection(base_dir: Optional[Path] = None) -> sqlite3.Connection:
         db_path = get_db_path(base_dir)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row  # nicer dict-like access
+    conn.execute("PRAGMA foreign_keys = ON")
     _check_integrity(conn, db_path)
     return conn
 
