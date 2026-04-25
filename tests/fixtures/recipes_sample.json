@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1,
+    "name": "Chicken Thighs with Rice",
+    "ingredients": ["chicken thighs", "rice", "garlic", "onion", "olive oil"],
+    "tags": ["chicken", "weeknight", "under_30_min"]
+  },
+  {
+    "id": 2,
+    "name": "Beef Stir Fry",
+    "ingredients": ["beef", "broccoli", "soy sauce", "garlic", "rice"],
+    "tags": ["beef", "stir_fry", "weeknight"]
+  },
+  {
+    "id": 3,
+    "name": "Pork Chops with Apple",
+    "ingredients": ["pork", "apples", "rosemary", "potatoes"],
+    "tags": ["pork", "comfort"]
+  },
+  {
+    "id": 4,
+    "name": "Salmon Teriyaki",
+    "ingredients": ["salmon", "rice", "soy sauce", "ginger"],
+    "tags": ["fish", "pescatarian"]
+  },
+  {
+    "id": 5,
+    "name": "Veggie Pasta Primavera",
+    "ingredients": ["pasta", "zucchini", "bell pepper", "garlic", "olive oil"],
+    "tags": ["vegetarian", "quick"]
+  },
+  {
+    "id": 6,
+    "name": "Peanut Chicken Noodles",
+    "ingredients": ["chicken", "peanuts", "soy sauce", "rice"],
+    "tags": ["chicken", "asian", "contains_nuts"]
+  },
+  {
+    "id": 7,
+    "name": "Quinoa Salad",
+    "ingredients": ["quinoa", "cucumber", "tomato", "feta"],
+    "tags": ["vegetarian", "gluten_free", "salad"]
+  },
+  {
+    "id": 8,
+    "name": "Bread and Butter",
+    "ingredients": ["bread", "butter"],
+    "tags": ["snack", "contains_gluten"]
+  }
+]
