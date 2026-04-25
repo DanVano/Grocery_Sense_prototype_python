@@ -1,0 +1,55 @@
+{
+  "documents": [
+    {
+      "fields": {
+        "MerchantName": {
+          "valueString": "Test Mart",
+          "confidence": 0.95
+        },
+        "TransactionDate": {
+          "valueString": "2026-04-22",
+          "confidence": 0.90
+        },
+        "Subtotal": {
+          "valueCurrency": {"amount": 22.00},
+          "confidence": 0.88
+        },
+        "TotalTax": {
+          "valueCurrency": {"amount": 3.00},
+          "confidence": 0.85
+        },
+        "Total": {
+          "valueCurrency": {"amount": 25.00},
+          "confidence": 0.90
+        },
+        "Items": {
+          "valueArray": [
+            {
+              "valueObject": {
+                "Description": {"valueString": "EGGS DOZEN", "confidence": 0.91},
+                "Quantity": {"valueNumber": 1, "confidence": 0.88},
+                "UnitPrice": {"valueCurrency": {"amount": 4.99}, "confidence": 0.87},
+                "TotalPrice": {"valueCurrency": {"amount": 4.99}, "confidence": 0.87}
+              }
+            },
+            {
+              "valueObject": {
+                "Description": {"valueString": "APPLES 2/$5", "confidence": 0.85},
+                "Quantity": {"valueNumber": 2, "confidence": 0.80},
+                "UnitPrice": {"valueCurrency": {"amount": 2.50}, "confidence": 0.80},
+                "TotalPrice": {"valueCurrency": {"amount": 5.00}, "confidence": 0.80}
+              }
+            },
+            {
+              "valueObject": {
+                "Description": {"valueString": "", "confidence": 0.30},
+                "Quantity": {"valueNumber": 1, "confidence": 0.30},
+                "TotalPrice": {"valueCurrency": {"amount": 15.01}, "confidence": 0.30}
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

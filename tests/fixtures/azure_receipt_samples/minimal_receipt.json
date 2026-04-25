@@ -1,0 +1,21 @@
+{
+  "documents": [
+    {
+      "fields": {
+        "MerchantName": {
+          "valueString": "Minimal Mart"
+        },
+        "Items": {
+          "valueArray": [
+            {
+              "valueObject": {
+                "Description": {"valueString": "MYSTERY ITEM"},
+                "TotalPrice": {"valueCurrency": {"amount": 1.99}}
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

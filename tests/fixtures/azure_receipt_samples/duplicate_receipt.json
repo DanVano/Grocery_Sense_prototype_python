@@ -1,0 +1,40 @@
+{
+  "documents": [
+    {
+      "fields": {
+        "MerchantName": {
+          "valueString": "Test Mart",
+          "confidence": 0.94
+        },
+        "TransactionDate": {
+          "valueString": "2026-04-22",
+          "confidence": 0.91
+        },
+        "Subtotal": {
+          "valueCurrency": {"amount": 22.00},
+          "confidence": 0.87
+        },
+        "TotalTax": {
+          "valueCurrency": {"amount": 3.00},
+          "confidence": 0.86
+        },
+        "Total": {
+          "valueCurrency": {"amount": 25.00},
+          "confidence": 0.92
+        },
+        "Items": {
+          "valueArray": [
+            {
+              "valueObject": {
+                "Description": {"valueString": "BREAD LOAF", "confidence": 0.89},
+                "Quantity": {"valueNumber": 1, "confidence": 0.87},
+                "UnitPrice": {"valueCurrency": {"amount": 3.50}, "confidence": 0.85},
+                "TotalPrice": {"valueCurrency": {"amount": 3.50}, "confidence": 0.85}
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
