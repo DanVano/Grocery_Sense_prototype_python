@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(wc -l \"/c/Coding Projects/Grocery-Sense-prototype-python-main\"/src/Grocery_Sense/**/*.py)",
-      "Bash(xargs wc:*)"
+      "Bash(xargs wc:*)",
+      "Bash(python -m pytest tests/persistence/test_stores_repo.py --tb=short -q)"
     ]
   }
 }
