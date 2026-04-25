@@ -1,0 +1,66 @@
+[
+  {
+    "case": "exact_match",
+    "raw": "chicken breast",
+    "canonicals": ["chicken breast", "chicken thighs"],
+    "expected_method": "fuzzy",
+    "expected_canonical": "chicken breast",
+    "note": "Trivial sanity: normalized input equals a canonical name."
+  },
+  {
+    "case": "abbrev_expansion",
+    "raw": "CHK BRST VALUE PACK",
+    "canonicals": ["chicken breast", "chicken thighs"],
+    "expected_method": "fuzzy",
+    "expected_canonical": "chicken breast",
+    "note": "chk→chicken + brst→breast + stopword 'value pack' stripped."
+  },
+  {
+    "case": "collision_oil_vs_olive_oil",
+    "raw": "oil",
+    "canonicals": ["olive oil"],
+    "expected_method": "none",
+    "expected_canonical": null,
+    "note": "Mandatory Failure Class #3 guard: short ambiguous token must not collapse into a longer specific canonical."
+  },
+  {
+    "case": "collision_cream_vs_ice_cream",
+    "raw": "cream",
+    "canonicals": ["ice cream"],
+    "expected_method": "none",
+    "expected_canonical": null,
+    "note": "Mandatory guard: 'cream' alone must not match 'ice cream'."
+  },
+  {
+    "case": "collision_chicken_vs_chicken_broth",
+    "raw": "chicken",
+    "canonicals": ["chicken broth", "chicken thighs"],
+    "expected_method": "none",
+    "expected_canonical": null,
+    "note": "Bare 'chicken' is ambiguous across multiple canonicals — weak-match path should not pick one."
+  },
+  {
+    "case": "weak_gibberish",
+    "raw": "zzzqqq",
+    "canonicals": ["chicken breast"],
+    "expected_method": "none",
+    "expected_canonical": null,
+    "note": "Non-matching input must return method=none regardless of threshold."
+  },
+  {
+    "case": "empty_input",
+    "raw": "   ",
+    "canonicals": ["chicken breast"],
+    "expected_method": "none",
+    "expected_canonical": null,
+    "note": "Whitespace-only input short-circuits to none."
+  },
+  {
+    "case": "symbol_normalization",
+    "raw": "Chicken-Breast!!!",
+    "canonicals": ["chicken breast"],
+    "expected_method": "fuzzy",
+    "expected_canonical": "chicken breast",
+    "note": "Punctuation stripped by normalizer."
+  }
+]

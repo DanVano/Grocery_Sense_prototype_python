@@ -1,0 +1,25 @@
+{
+  "pages": [
+    {
+      "lines": [
+        { "content": "Chicken Thighs",                "confidence": 0.95 },
+        { "content": "Family Pack",                   "confidence": 0.91 },
+        { "content": "$5.99/kg",                      "confidence": 0.88 },
+
+        { "content": "Fresh Apples",                  "confidence": 0.96 },
+        { "content": "2/$5",                          "confidence": 0.92 },
+
+        { "content": "Pork Loin Roast",               "confidence": 0.90 },
+        { "content": "3 for 10",                      "confidence": 0.89 },
+
+        { "content": "Header row — no price here",    "confidence": 0.80 },
+
+        { "content": "Olive Oil 500 ml",              "confidence": 0.87 },
+        { "content": "Was $8.99 Now $4.99",           "confidence": 0.85 },
+
+        { "content": "Yogurt 750 g",                  "confidence": 0.90 },
+        { "content": "2 @ 4.00",                      "confidence": 0.86 }
+      ]
+    }
+  ]
+}

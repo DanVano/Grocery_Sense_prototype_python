@@ -1,0 +1,22 @@
+[
+  {
+    "title": "Chicken Thighs Family Pack",
+    "description": "Fresh, bone-in",
+    "price_text": "$5.99/kg"
+  },
+  {
+    "title": "Fresh Apples",
+    "description": "Red Delicious, 3 lb bag",
+    "price_text": "2/$5"
+  },
+  {
+    "title": "Yogurt 750 g",
+    "description": "Plain, full fat",
+    "price_text": "$3.49"
+  },
+  {
+    "title": "",
+    "description": "",
+    "price_text": ""
+  }
+]
