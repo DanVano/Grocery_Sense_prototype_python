@@ -14,7 +14,24 @@ from Grocery_Sense.services.unit_normalization_service import UnitNormalizationS
 
 
 _PRICE_ANY = re.compile(r"(\$?\s*\d+(?:\.\d{2})?)")
-_MONEY = re.compile(r"\$?\s*(\d+(?:\.\d{2})?)")
+
+# Strict money: either a $-prefixed amount, or the string IS a decimal number
+# (optionally surrounded by whitespace, optional trailing /unit suffix stripped
+# by the caller). Rejects OCR letter-O prefixes ("O.99"), European decimals
+# ("1,25"), and multi-amount strings like "Was $4.99 Now $2.99".
+_STRICT_MONEY = re.compile(
+    r"""
+    ^\s*                       # allow leading whitespace
+    (?:
+        \$\s*(?P<dollar>\d+(?:\.\d{1,2})?)          # $-prefixed: any amount
+        |                                           # OR
+        (?P<bare>\d+(?:\.\d{1,2})?)                 # bare number...
+        (?:\s*/.*)?                                 # ...optionally followed by /unit
+    )
+    \s*$                       # nothing else after
+    """,
+    re.VERBOSE,
+)
 
 
 def _guess_asset_type(path: Path) -> str:
@@ -24,14 +41,30 @@ def _guess_asset_type(path: Path) -> str:
     return "image"
 
 
-def _safe_float_money(s: str) -> Optional[float]:
+def _safe_float_money(s: Optional[str]) -> Optional[float]:
+    """
+    Parse a money-like string into a float, rejecting dirty OCR input.
+
+    Returns None for:
+      - empty / None
+      - strings with non-digit prefixes like "O.99" (letter O)
+      - European decimal commas like "1,25"
+      - multi-amount strings like "Was $4.99 Now $2.99" (ambiguous — caller
+        should disambiguate upstream)
+      - anything without a valid decimal number
+    """
     if not s:
         return None
-    m = _MONEY.search(s)
+    text = str(s).strip()
+    if not text:
+        return None
+
+    m = _STRICT_MONEY.match(text)
     if not m:
         return None
+    raw = m.group("dollar") or m.group("bare")
     try:
-        return float(m.group(1))
+        return float(raw)
     except Exception:
         return None
 
