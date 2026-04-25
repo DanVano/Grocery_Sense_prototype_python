@@ -213,19 +213,59 @@ def set_planned_store_id(item_id: int, planned_store_id: Optional[int]) -> None:
 
 def bulk_set_planned_store_ids(assignments: List[Tuple[int, Optional[int]]]) -> int:
     """
-    assignments = [(item_id, planned_store_id_or_None), ...]
+    Update planned_store_id on shopping_list rows keyed by row id.
+
+    assignments = [(row_id, planned_store_id_or_None), ...]
     Returns number of attempted updates.
     """
     if not assignments:
         return 0
 
-    rows = [(int(item_id), int(store_id) if store_id is not None else None) for (item_id, store_id) in assignments]
+    rows = [(int(row_id), int(store_id) if store_id is not None else None) for (row_id, store_id) in assignments]
 
     with get_connection() as conn:
         conn.executemany(
             "UPDATE shopping_list SET planned_store_id = ? WHERE id = ?",
-            [(store_id, item_id) for (item_id, store_id) in rows],
+            [(store_id, row_id) for (row_id, store_id) in rows],
         )
         conn.commit()
 
     return len(rows)
+
+
+def bulk_set_planned_store_ids_by_item_id(
+    assignments: List[Tuple[int, Optional[int]]],
+    *,
+    active_only: bool = True,
+) -> int:
+    """
+    Update planned_store_id on shopping_list rows keyed by CANONICAL item_id
+    (items.id), not row id. This is what callers who have an optimizer result
+    — which holds canonical item ids — actually want.
+
+    assignments = [(item_id, planned_store_id_or_None), ...]
+    Returns the number of rows actually updated (sums cur.rowcount per UPDATE).
+
+    When active_only=True (default), only active, non-deleted rows are touched,
+    so clearing the list doesn't inadvertently modify archived rows.
+    """
+    if not assignments:
+        return 0
+
+    rows = [
+        (int(item_id), int(store_id) if store_id is not None else None)
+        for (item_id, store_id) in assignments
+    ]
+
+    active_clause = " AND is_active = 1 AND is_deleted = 0" if active_only else ""
+    sql = f"UPDATE shopping_list SET planned_store_id = ? WHERE item_id = ?{active_clause}"
+
+    updated = 0
+    with get_connection() as conn:
+        for item_id, store_id in rows:
+            cur = conn.execute(sql, (store_id, item_id))
+            if cur.rowcount and cur.rowcount > 0:
+                updated += cur.rowcount
+        conn.commit()
+
+    return updated

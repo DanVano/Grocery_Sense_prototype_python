@@ -217,7 +217,7 @@ def apply_optimizer_plan_to_active_list(
 
             assignments.append((int(item_id), int(assigned_store) if assigned_store is not None else None))
 
-    updated = shopping_list_repo.bulk_set_planned_store_ids(assignments)
+    updated = shopping_list_repo.bulk_set_planned_store_ids_by_item_id(assignments)
 
     warnings = list(getattr(optimizer_result, "warnings", []) or [])
     if unassigned_hard_excluded > 0:
